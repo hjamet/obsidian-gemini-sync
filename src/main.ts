@@ -3,7 +3,7 @@ import { DriveClient } from './drive/driveClient';
 import { SyncManager } from './sync/syncManager';
 import { SetupWizardModal } from './ui/setupWizard';
 
-interface GeminiSyncSettings {
+export interface GeminiSyncSettings {
     clientId: string;
     clientSecret: string;
     refreshToken: string;
@@ -11,6 +11,7 @@ interface GeminiSyncSettings {
     syncImages: boolean;
     syncPDFs: boolean;
     syncInterval: number; // in minutes
+    excludedFolders: string; // New setting: comma or newline separated list
 }
 
 const DEFAULT_SETTINGS: GeminiSyncSettings = {
@@ -20,7 +21,8 @@ const DEFAULT_SETTINGS: GeminiSyncSettings = {
     remoteFolderPath: '',
     syncImages: true,
     syncPDFs: true,
-    syncInterval: 60
+    syncInterval: 60,
+    excludedFolders: ''
 }
 
 export default class GeminiSyncPlugin extends Plugin {
@@ -28,13 +30,17 @@ export default class GeminiSyncPlugin extends Plugin {
     driveClient: DriveClient;
     syncManager: SyncManager;
     syncIntervalId: number | undefined;
+    statusBarItem: HTMLElement;
 
     async onload() {
         await this.loadSettings();
 
         this.initializeDriveClient();
 
-        this.syncManager = new SyncManager(this.app, this.driveClient, this.settings);
+        this.statusBarItem = this.addStatusBarItem();
+        this.statusBarItem.setText('');
+
+        this.syncManager = new SyncManager(this.app, this.driveClient, this.settings, this.statusBarItem);
 
         this.addSettingTab(new GeminiSyncSettingTab(this.app, this));
 
@@ -88,7 +94,7 @@ export default class GeminiSyncPlugin extends Plugin {
         }
 
         if (this.settings.syncInterval > 0) {
-            console.log(`Gemini Sync: Enabling periodic sync every ${this.settings.syncInterval} minutes.`);
+            // console.log(`Gemini Sync: Enabling periodic sync every ${this.settings.syncInterval} minutes.`);
             this.syncIntervalId = window.setInterval(async () => {
                 console.log('Gemini Sync: Triggering periodic sync...');
                 await this.syncManager.syncVault();
@@ -189,6 +195,17 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                         this.plugin.settings.syncInterval = num;
                         await this.plugin.saveSettings();
                     }
+                }));
+
+        new Setting(containerEl)
+            .setName('Excluded Folders')
+            .setDesc('List of folders to exclude from synchronization (one per line).')
+            .addTextArea(text => text
+                .setPlaceholder('Folder1\nFolder2/Subfolder')
+                .setValue(this.plugin.settings.excludedFolders)
+                .onChange(async (value) => {
+                    this.plugin.settings.excludedFolders = value;
+                    await this.plugin.saveSettings();
                 }));
 
         containerEl.createEl('hr');

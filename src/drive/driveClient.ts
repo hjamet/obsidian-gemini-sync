@@ -135,9 +135,13 @@ export class DriveClient {
             fileMetadata.mimeType = mimeType; // Convert to Google Doc
         }
 
+        let body = content;
+        // Direct buffer passing is more reliable in Obsidian/Electron environment
+        // than creating a stream manually which can result in 0-byte uploads if not handled perfectly.
+
         const media = {
             mimeType: mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType,
-            body: content,
+            body: body,
         };
 
         const res = await drive.files.create({
@@ -156,14 +160,12 @@ export class DriveClient {
     async updateFile(fileId: string, content: any, mimeType: string): Promise<void> {
         const drive = this.getDrive();
 
-        // If it's a Google Doc, we might need to use the Docs API for content updates if we want to preserve formatting,
-        // but for simple overwrite (or if we treat it as a new revision), we can use drive.files.update.
-        // However, for Google Docs, drive.files.update with media might not work as expected for "converting" content again.
-        // For now, let's assume we are updating the content.
+        let body = content;
+        // Direct buffer passing
 
         const media = {
             mimeType: mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType,
-            body: content,
+            body: body,
         };
 
         await drive.files.update({
@@ -175,11 +177,14 @@ export class DriveClient {
     /**
      * Searches for a file by name and parent.
      */
-    async getFileId(name: string, parentId?: string): Promise<string | null> {
+    async getFileId(name: string, parentId?: string, mimeType?: string): Promise<string | null> {
         const drive = this.getDrive();
         let query = `name = '${name}' and trashed = false`;
         if (parentId) {
             query += ` and '${parentId}' in parents`;
+        }
+        if (mimeType) {
+            query += ` and mimeType = '${mimeType}'`;
         }
 
         const res = await drive.files.list({
