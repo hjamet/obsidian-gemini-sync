@@ -125,7 +125,6 @@ export class DriveClient {
      * @returns The ID of the uploaded file.
      */
     async uploadFile(name: string, content: any, mimeType: string, parentId?: string): Promise<string> {
-        console.log(`[DriveClient] Starting upload for ${name} (${mimeType})`);
         const drive = this.getDrive();
         const fileMetadata: any = {
             name: name,
@@ -141,11 +140,8 @@ export class DriveClient {
         
         // Handle Buffer specifically by converting to Blob
         if (Buffer.isBuffer(content)) {
-             console.log(`[DriveClient] Binary content detected (size: ${content.length}). Using manual Resumable Upload via fetch.`);
              const blob = new Blob([content], { type: mimeType });
              return this.uploadFileResumable(name, blob, mimeType, parentId);
-        } else {
-            console.log(`[DriveClient] Content type: ${typeof content}`);
         }
 
         const media = {
@@ -161,10 +157,9 @@ export class DriveClient {
             });
 
             if (!res.data.id) throw new Error('Failed to upload file');
-            console.log(`[DriveClient] Upload successful, ID: ${res.data.id}`);
             return res.data.id;
         } catch (error) {
-            console.error('[DriveClient] Upload error:', error);
+            console.error('Failed to upload file:', error);
             throw error;
         }
     }
@@ -173,11 +168,8 @@ export class DriveClient {
      * Updates an existing file in Google Drive.
      */
     async updateFile(fileId: string, content: any, mimeType: string): Promise<void> {
-        console.log(`[DriveClient] Starting update for ${fileId} (${mimeType})`);
-        
         // Handle Buffer specifically
         if (Buffer.isBuffer(content)) {
-             console.log(`[DriveClient] Binary content detected. Using manual Resumable Update via fetch.`);
              const blob = new Blob([content], { type: mimeType });
              await this.updateFileResumable(fileId, blob, mimeType);
              return;
@@ -196,9 +188,8 @@ export class DriveClient {
                 fileId: fileId,
                 media: media,
             });
-            console.log(`[DriveClient] Update successful for ${fileId}`);
         } catch (error) {
-            console.error(`[DriveClient] Update failed for ${fileId}:`, error);
+            console.error(`Failed to update file ${fileId}:`, error);
             throw error;
         }
     }
@@ -236,7 +227,6 @@ export class DriveClient {
             if (!location) throw new Error('No Location header in resumable upload response');
 
             // 2. Upload File Content
-            console.log(`[DriveClient] Uploading blob size: ${blob.size} to ${location}`);
             const uploadRes = await fetch(location, {
                 method: 'PUT',
                 headers: {
@@ -252,11 +242,10 @@ export class DriveClient {
             }
 
             const result = await uploadRes.json();
-            console.log(`[DriveClient] Manual upload successful, ID: ${result.id}`);
             return result.id;
 
         } catch (error) {
-            console.error('[DriveClient] Manual Resumable Upload failed:', error);
+            console.error('Manual Resumable Upload failed:', error);
             throw error;
         }
     }
@@ -291,7 +280,6 @@ export class DriveClient {
             if (!location) throw new Error('No Location header in resumable update response');
 
             // 2. Upload File Content
-            console.log(`[DriveClient] Updating blob size: ${blob.size} to ${location}`);
             const uploadRes = await fetch(location, {
                 method: 'PUT',
                 headers: {
@@ -306,10 +294,8 @@ export class DriveClient {
                 throw new Error(`Failed to update content: ${uploadRes.status} ${txt}`);
             }
 
-            console.log(`[DriveClient] Manual update successful for ${fileId}`);
-
         } catch (error) {
-            console.error('[DriveClient] Manual Resumable Update failed:', error);
+            console.error('Manual Resumable Update failed:', error);
             throw error;
         }
     }
