@@ -39,7 +39,7 @@ export class SetupWizardModal extends Modal {
 
         // Progress indicator
         const progressDiv = stepContainer.createDiv('wizard-progress');
-        progressDiv.createEl('small', { text: `Étape ${this.currentStep + 1} sur ${this.steps.length}` });
+        progressDiv.createEl('small', { text: `Step ${this.currentStep + 1} of ${this.steps.length}` });
         const progressBar = progressDiv.createEl('progress');
         progressBar.setAttribute('value', (this.currentStep + 1).toString());
         progressBar.setAttribute('max', this.steps.length.toString());
@@ -56,7 +56,7 @@ export class SetupWizardModal extends Modal {
         if (this.currentStep > 0) {
             new Setting(buttonContainer)
                 .addButton(btn => btn
-                    .setButtonText('Précédent')
+                    .setButtonText('Previous')
                     .onClick(() => {
                         this.currentStep--;
                         this.renderStep();
@@ -68,7 +68,7 @@ export class SetupWizardModal extends Modal {
         if (this.currentStep < this.steps.length - 1) {
             new Setting(buttonContainer)
                 .addButton(btn => btn
-                    .setButtonText('Suivant')
+                    .setButtonText('Next')
                     .setCta()
                     .onClick(() => {
                         if (this.validateStep()) {
@@ -79,7 +79,7 @@ export class SetupWizardModal extends Modal {
         } else {
             new Setting(buttonContainer)
                 .addButton(btn => btn
-                    .setButtonText('Terminer')
+                    .setButtonText('Finish')
                     .setCta()
                     .onClick(() => {
                         this.close();
@@ -91,7 +91,7 @@ export class SetupWizardModal extends Modal {
         // Add specific validation logic per step if needed
         if (this.currentStep === 3) { // Credentials step
             if (!this.plugin.settings.clientId || !this.plugin.settings.clientSecret) {
-                new Notice('Veuillez entrer le Client ID et le Client Secret.');
+                new Notice('Please enter Client ID and Client Secret.');
                 return false;
             }
         }
@@ -99,42 +99,42 @@ export class SetupWizardModal extends Modal {
     }
 
     renderWelcome(container: HTMLElement) {
-        container.createEl('h2', { text: 'Bienvenue dans l\'assistant de configuration Gemini Sync' });
-        container.createEl('p', { text: 'Cet assistant va vous guider étape par étape pour configurer la synchronisation avec Google Drive.' });
-        container.createEl('p', { text: 'Vous aurez besoin d\'un compte Google et d\'environ 5-10 minutes.' });
+        container.createEl('h2', { text: 'Welcome to Gemini Sync Setup Wizard' });
+        container.createEl('p', { text: 'This wizard will guide you step-by-step to configure synchronization with Google Drive.' });
+        container.createEl('p', { text: 'You will need a Google account and about 5-10 minutes.' });
     }
 
     renderProjectCreation(container: HTMLElement) {
-        container.createEl('h2', { text: '1. Création du projet Google Cloud' });
-        container.createEl('p', { text: 'Pour commencer, nous devons créer un projet sur Google Cloud Platform.' });
+        container.createEl('h2', { text: '1. Google Cloud Project Creation' });
+        container.createEl('p', { text: 'To start, we need to create a project on Google Cloud Platform.' });
 
         const list = container.createEl('ol');
-        list.createEl('li').createEl('a', { text: 'Ouvrez la Google Cloud Console', href: 'https://console.cloud.google.com/' });
-        list.createEl('li', { text: 'Créez un nouveau projet (ex: "Obsidian Gemini Sync").' });
-        list.createEl('li', { text: 'Allez dans "APIs & Services" > "Library".' });
-        list.createEl('li', { text: 'Activez "Google Drive API".' });
-        list.createEl('li', { text: 'Activez "Google Docs API".' });
+        list.createEl('li').createEl('a', { text: 'Open Google Cloud Console', href: 'https://console.cloud.google.com/' });
+        list.createEl('li', { text: 'Create a new project (e.g., "Obsidian Gemini Sync").' });
+        list.createEl('li', { text: 'Go to "APIs & Services" > "Library".' });
+        list.createEl('li', { text: 'Enable "Google Drive API".' });
+        list.createEl('li', { text: 'Enable "Google Docs API".' });
     }
 
     renderOAuthConsent(container: HTMLElement) {
-        container.createEl('h2', { text: '2. Écran de consentement OAuth' });
-        container.createEl('p', { text: 'Configurez l\'écran qui s\'affichera lors de la connexion.' });
+        container.createEl('h2', { text: '2. OAuth Consent Screen' });
+        container.createEl('p', { text: 'Configure the screen that will appear during login.' });
 
         const list = container.createEl('ol');
-        list.createEl('li', { text: 'Allez dans "APIs & Services" > "OAuth consent screen".' });
-        list.createEl('li', { text: 'Choisissez "External" et créez.' });
-        list.createEl('li', { text: 'Remplissez le nom de l\'app et les emails de contact.' });
-        list.createEl('li', { text: 'Ajoutez votre email Google dans la section "Test users". C\'est très important !' });
+        list.createEl('li', { text: 'Go to "APIs & Services" > "OAuth consent screen".' });
+        list.createEl('li', { text: 'Choose "External" and create.' });
+        list.createEl('li', { text: 'Fill in the app name and contact emails.' });
+        list.createEl('li', { text: 'Add your Google email in the "Test users" section. This is very important!' });
     }
 
     renderCredentials(container: HTMLElement) {
-        container.createEl('h2', { text: '3. Création des identifiants' });
-        container.createEl('p', { text: 'Créez les clés pour que le plugin puisse se connecter.' });
+        container.createEl('h2', { text: '3. Credentials Creation' });
+        container.createEl('p', { text: 'Create keys so the plugin can connect.' });
 
         const list = container.createEl('ol');
-        list.createEl('li', { text: 'Allez dans "APIs & Services" > "Credentials".' });
-        list.createEl('li', { text: 'Créez un "OAuth client ID" de type "Desktop app".' });
-        list.createEl('li', { text: 'Copiez les identifiants ci-dessous :' });
+        list.createEl('li', { text: 'Go to "APIs & Services" > "Credentials".' });
+        list.createEl('li', { text: 'Create an "OAuth client ID" of type "Desktop app".' });
+        list.createEl('li', { text: 'Copy the credentials below:' });
 
         new Setting(container)
             .setName('Client ID')
@@ -156,16 +156,16 @@ export class SetupWizardModal extends Modal {
     }
 
     renderAuthentication(container: HTMLElement) {
-        container.createEl('h2', { text: '4. Authentification' });
-        container.createEl('p', { text: 'Connectons maintenant le plugin à votre compte Google.' });
+        container.createEl('h2', { text: '4. Authentication' });
+        container.createEl('p', { text: 'Let\'s connect the plugin to your Google account.' });
 
         new Setting(container)
-            .setName('Générer le lien de connexion')
+            .setName('Generate Login Link')
             .addButton(btn => btn
-                .setButtonText('Générer URL')
+                .setButtonText('Generate URL')
                 .onClick(() => {
                     if (!this.plugin.settings.clientId || !this.plugin.settings.clientSecret) {
-                        new Notice('Client ID/Secret manquants !');
+                        new Notice('Client ID/Secret missing!');
                         return;
                     }
                     // Initialize client to ensure it has latest settings
@@ -175,33 +175,33 @@ export class SetupWizardModal extends Modal {
                 }));
 
         new Setting(container)
-            .setName('Code d\'autorisation')
-            .setDesc('Collez le code obtenu après connexion')
+            .setName('Authorization Code')
+            .setDesc('Paste the code obtained after login')
             .addText(text => text
-                .setPlaceholder('Collez le code ici')
+                .setPlaceholder('Paste code here')
                 .onChange(async (value) => {
                     try {
                         await this.plugin.driveClient.authorize(value);
-                        new Notice('Authentification réussie !');
+                        new Notice('Authentication successful!');
                         // Refresh UI or show success indicator
-                        const successMsg = container.createEl('p', { text: '✅ Connecté avec succès !', cls: 'gemini-sync-success' });
+                        const successMsg = container.createEl('p', { text: '✅ Connected successfully!', cls: 'gemini-sync-success' });
                         successMsg.style.color = 'green';
                     } catch (e) {
-                        new Notice('Erreur d\'authentification : ' + e.message);
+                        new Notice('Authentication error: ' + e.message);
                     }
                 }));
     }
 
     renderRemoteFolder(container: HTMLElement) {
-        container.createEl('h2', { text: '5. Dossier de destination' });
-        container.createEl('p', { text: 'Où voulez-vous stocker votre coffre sur Google Drive ?' });
-        container.createEl('p', { text: 'Par défaut, le coffre sera synchronisé à la racine de votre Drive. Vous pouvez spécifier un sous-dossier (ex: "Backups/MonCoffre").' });
+        container.createEl('h2', { text: '5. Destination Folder' });
+        container.createEl('p', { text: 'Where do you want to store your vault on Google Drive?' });
+        container.createEl('p', { text: 'By default, the vault will be synchronized to the root of your Drive. You can specify a subfolder (e.g., "Backups/MyVault").' });
 
         new Setting(container)
-            .setName('Chemin du dossier distant')
-            .setDesc('Laisser vide pour la racine')
+            .setName('Remote Folder Path')
+            .setDesc('Leave empty for root')
             .addText(text => text
-                .setPlaceholder('Ex: Obsidian/MonCoffre')
+                .setPlaceholder('e.g. Obsidian/MyVault')
                 .setValue(this.plugin.settings.remoteFolderPath || '')
                 .onChange(async (value) => {
                     this.plugin.settings.remoteFolderPath = value;
@@ -210,11 +210,11 @@ export class SetupWizardModal extends Modal {
     }
 
     renderCompletion(container: HTMLElement) {
-        container.createEl('h2', { text: 'Configuration terminée ! 🎉' });
-        container.createEl('p', { text: 'Tout est prêt. Vous pouvez maintenant fermer cet assistant et lancer votre première synchronisation.' });
+        container.createEl('h2', { text: 'Configuration Complete! 🎉' });
+        container.createEl('p', { text: 'Everything is ready. You can now close this wizard and start your first synchronization.' });
 
         if (this.plugin.settings.remoteFolderPath) {
-            container.createEl('p', { text: `Dossier de destination : ${this.plugin.settings.remoteFolderPath}` });
+            container.createEl('p', { text: `Destination folder: ${this.plugin.settings.remoteFolderPath}` });
         }
     }
 }
