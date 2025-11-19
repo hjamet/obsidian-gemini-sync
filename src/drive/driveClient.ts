@@ -1,6 +1,7 @@
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import { Notice } from 'obsidian';
+// Stream imports removed as we use Blob for Electron/Browser environment
 
 export interface DriveClientOptions {
     clientId: string;
@@ -124,6 +125,7 @@ export class DriveClient {
      * @returns The ID of the uploaded file.
      */
     async uploadFile(name: string, content: any, mimeType: string, parentId?: string): Promise<string> {
+        console.log(`[DriveClient] Starting upload for ${name} (${mimeType})`);
         const drive = this.getDrive();
         const fileMetadata: any = {
             name: name,
@@ -136,42 +138,180 @@ export class DriveClient {
         }
 
         let body = content;
-        // Direct buffer passing is more reliable in Obsidian/Electron environment
-        // than creating a stream manually which can result in 0-byte uploads if not handled perfectly.
+        
+        // Handle Buffer specifically by converting to Blob
+        if (Buffer.isBuffer(content)) {
+             console.log(`[DriveClient] Binary content detected (size: ${content.length}). Using manual Resumable Upload via fetch.`);
+             const blob = new Blob([content], { type: mimeType });
+             return this.uploadFileResumable(name, blob, mimeType, parentId);
+        } else {
+            console.log(`[DriveClient] Content type: ${typeof content}`);
+        }
 
         const media = {
             mimeType: mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType,
             body: body,
         };
 
-        const res = await drive.files.create({
-            requestBody: fileMetadata,
-            media: media,
-            fields: 'id',
-        });
+        try {
+            const res = await drive.files.create({
+                requestBody: fileMetadata,
+                media: media,
+                fields: 'id',
+            });
 
-        if (!res.data.id) throw new Error('Failed to upload file');
-        return res.data.id;
+            if (!res.data.id) throw new Error('Failed to upload file');
+            console.log(`[DriveClient] Upload successful, ID: ${res.data.id}`);
+            return res.data.id;
+        } catch (error) {
+            console.error('[DriveClient] Upload error:', error);
+            throw error;
+        }
     }
 
     /**
      * Updates an existing file in Google Drive.
      */
     async updateFile(fileId: string, content: any, mimeType: string): Promise<void> {
-        const drive = this.getDrive();
+        console.log(`[DriveClient] Starting update for ${fileId} (${mimeType})`);
+        
+        // Handle Buffer specifically
+        if (Buffer.isBuffer(content)) {
+             console.log(`[DriveClient] Binary content detected. Using manual Resumable Update via fetch.`);
+             const blob = new Blob([content], { type: mimeType });
+             await this.updateFileResumable(fileId, blob, mimeType);
+             return;
+        }
 
+        const drive = this.getDrive();
         let body = content;
-        // Direct buffer passing
 
         const media = {
             mimeType: mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType,
             body: body,
         };
 
-        await drive.files.update({
-            fileId: fileId,
-            media: media,
-        });
+        try {
+            await drive.files.update({
+                fileId: fileId,
+                media: media,
+            });
+            console.log(`[DriveClient] Update successful for ${fileId}`);
+        } catch (error) {
+            console.error(`[DriveClient] Update failed for ${fileId}:`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Manual Resumable Upload using fetch to bypass googleapis issues with binary files in Electron.
+     */
+    async uploadFileResumable(name: string, blob: Blob, mimeType: string, parentId?: string): Promise<string> {
+        try {
+            const tokenResponse = await this.oAuth2Client.getAccessToken();
+            const accessToken = tokenResponse.token;
+            if (!accessToken) throw new Error('No access token available');
+
+            const metadata: any = { name };
+            if (parentId) metadata.parents = [parentId];
+
+            // 1. Initiate Resumable Session
+            const initRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                    'X-Upload-Content-Type': mimeType,
+                    'X-Upload-Content-Length': blob.size.toString()
+                },
+                body: JSON.stringify(metadata)
+            });
+
+            if (!initRes.ok) {
+                const txt = await initRes.text();
+                throw new Error(`Failed to initiate upload: ${initRes.status} ${txt}`);
+            }
+
+            const location = initRes.headers.get('Location');
+            if (!location) throw new Error('No Location header in resumable upload response');
+
+            // 2. Upload File Content
+            console.log(`[DriveClient] Uploading blob size: ${blob.size} to ${location}`);
+            const uploadRes = await fetch(location, {
+                method: 'PUT',
+                headers: {
+                   'Content-Length': blob.size.toString(),
+                   'Content-Type': mimeType
+                },
+                body: blob
+            });
+
+            if (!uploadRes.ok) {
+                const txt = await uploadRes.text();
+                throw new Error(`Failed to upload content: ${uploadRes.status} ${txt}`);
+            }
+
+            const result = await uploadRes.json();
+            console.log(`[DriveClient] Manual upload successful, ID: ${result.id}`);
+            return result.id;
+
+        } catch (error) {
+            console.error('[DriveClient] Manual Resumable Upload failed:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Manual Resumable Update using fetch.
+     */
+    async updateFileResumable(fileId: string, blob: Blob, mimeType: string): Promise<void> {
+         try {
+            const tokenResponse = await this.oAuth2Client.getAccessToken();
+            const accessToken = tokenResponse.token;
+            if (!accessToken) throw new Error('No access token available');
+
+            // 1. Initiate Resumable Session (PATCH)
+            const initRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable`, {
+                method: 'PATCH',
+                headers: {
+                    'Authorization': `Bearer ${accessToken}`,
+                    'Content-Type': 'application/json',
+                    'X-Upload-Content-Type': mimeType,
+                    'X-Upload-Content-Length': blob.size.toString()
+                },
+                body: JSON.stringify({}) // Empty metadata update, just content
+            });
+
+            if (!initRes.ok) {
+                const txt = await initRes.text();
+                throw new Error(`Failed to initiate update: ${initRes.status} ${txt}`);
+            }
+
+            const location = initRes.headers.get('Location');
+            if (!location) throw new Error('No Location header in resumable update response');
+
+            // 2. Upload File Content
+            console.log(`[DriveClient] Updating blob size: ${blob.size} to ${location}`);
+            const uploadRes = await fetch(location, {
+                method: 'PUT',
+                headers: {
+                   'Content-Length': blob.size.toString(),
+                   'Content-Type': mimeType
+                },
+                body: blob
+            });
+
+            if (!uploadRes.ok) {
+                const txt = await uploadRes.text();
+                throw new Error(`Failed to update content: ${uploadRes.status} ${txt}`);
+            }
+
+            console.log(`[DriveClient] Manual update successful for ${fileId}`);
+
+        } catch (error) {
+            console.error('[DriveClient] Manual Resumable Update failed:', error);
+            throw error;
+        }
     }
 
     /**
