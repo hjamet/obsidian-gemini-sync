@@ -96,8 +96,8 @@ export class SyncManager {
             const files = this.app.vault.getFiles();
             
             // Parse excluded folders
-            const excludedFolders = this.settings.excludedFolders
-                ? this.settings.excludedFolders.split('\n').map(p => p.trim()).filter(p => p.length > 0)
+            const excludedFolders = Array.isArray(this.settings.excludedFolders) 
+                ? this.settings.excludedFolders 
                 : [];
 
             const filesToSync = files.filter(file => {
