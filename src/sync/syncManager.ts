@@ -14,15 +14,26 @@ interface SyncIndex {
     [path: string]: SyncIndexEntry;
 }
 
+interface SyncSettings {
+    syncImages: boolean;
+    syncPDFs: boolean;
+}
+
 export class SyncManager {
     private app: App;
     private driveClient: DriveClient;
     private syncIndex: SyncIndex = {};
     private readonly INDEX_FILE = 'gemini-sync-index.json';
+    private settings: SyncSettings;
 
-    constructor(app: App, driveClient: DriveClient) {
+    constructor(app: App, driveClient: DriveClient, settings: SyncSettings) {
         this.app = app;
         this.driveClient = driveClient;
+        this.settings = settings;
+    }
+
+    updateSettings(settings: SyncSettings) {
+        this.settings = settings;
     }
 
     async loadIndex() {
@@ -45,14 +56,53 @@ export class SyncManager {
         new Notice('Gemini Sync: Starting sync...');
         await this.loadIndex();
 
-        const files = this.app.vault.getFiles();
+        const allFiles = this.app.vault.getFiles();
+        const filesToSync = allFiles.filter(file => {
+            // Filter hidden files/folders
+            if (file.path.startsWith('.') || file.path.includes('/.')) {
+                return false;
+            }
+
+            // Filter by type based on settings
+            const ext = file.extension.toLowerCase();
+            if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext) && !this.settings.syncImages) {
+                return false;
+            }
+            if (ext === 'pdf' && !this.settings.syncPDFs) {
+                return false;
+            }
+
+            const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext);
+            const isPdf = ext === 'pdf';
+            const isMd = ext === 'md';
+
+            if (!isMd && !isImage && !isPdf) {
+                return false;
+            }
+            return true;
+        });
+
+        const totalFiles = filesToSync.length;
+        console.log(`Gemini Sync: Found ${totalFiles} files to process.`);
+
         let syncedCount = 0;
         let errorCount = 0;
+        let processedCount = 0;
+        let lastLoggedPercent = 0;
 
-        for (const file of files) {
+        for (const file of filesToSync) {
+            processedCount++;
+
+            // Progress logging every 10%
+            const percent = Math.floor((processedCount / totalFiles) * 100);
+            if (percent >= lastLoggedPercent + 10) {
+                console.log(`Gemini Sync: Progress ${percent}% (${processedCount}/${totalFiles})`);
+                lastLoggedPercent = percent;
+            }
+
             try {
-                await this.syncFile(file);
-                syncedCount++;
+                const synced = await this.syncFile(file);
+                if (synced) syncedCount++;
             } catch (e) {
                 console.error(`Failed to sync ${file.path}`, e);
                 errorCount++;
@@ -60,54 +110,63 @@ export class SyncManager {
         }
 
         await this.saveIndex();
-        new Notice(`Gemini Sync: Completed. Synced ${syncedCount} files. Errors: ${errorCount}.`);
+
+        if (syncedCount > 0 || errorCount > 0) {
+            new Notice(`Gemini Sync: Completed. Synced ${syncedCount} files. Errors: ${errorCount}.`);
+        } else {
+            new Notice('Gemini Sync: Completed. No changes to sync.');
+        }
     }
 
-    private async syncFile(file: TFile) {
-        const content = await this.app.vault.read(file);
-        const hash = CryptoJS.MD5(content).toString();
+    private async syncFile(file: TFile): Promise<boolean> {
         const entry = this.syncIndex[file.path];
 
-        // Check if file needs sync
-        if (entry && entry.hash === hash) {
-            return; // No changes
+        // Optimization: Check mtime first
+        if (entry && entry.lastModified === file.stat.mtime) {
+            return false; // No changes based on mtime
         }
 
-        // Determine parent folder ID (simplified: assuming root for now, or we need to implement folder sync)
-        // For this MVP, let's put everything in a "Gemini Sync" folder or root.
-        // To support folders, we need to recursively create them and map them.
-        // Let's implement basic folder support.
+        let content: any;
+        let hash: string;
+
+        if (file.extension === 'md') {
+            content = await this.app.vault.read(file);
+            hash = CryptoJS.MD5(content).toString();
+        } else {
+            // Binary file
+            const arrayBuffer = await this.app.vault.readBinary(file);
+            // Convert ArrayBuffer to Buffer for Google API if needed, or pass as is if supported.
+            // Node environment usually prefers Buffer.
+            content = Buffer.from(arrayBuffer);
+            // MD5 for binary
+            const wordChanged = CryptoJS.lib.WordArray.create(arrayBuffer as any); // crypto-js supports arraybuffer
+            hash = CryptoJS.MD5(wordChanged).toString();
+        }
+
+        // Double check hash if entry exists (in case mtime changed but content didn't)
+        if (entry && entry.hash === hash) {
+            // Update mtime in index to avoid re-reading next time
+            this.syncIndex[file.path] = {
+                ...entry,
+                lastModified: file.stat.mtime
+            };
+            return false;
+        }
+
         const parentId = await this.ensureFolderStructure(file.parent?.path || '');
+        let mimeType = 'application/octet-stream';
+        if (file.extension === 'md') mimeType = 'application/vnd.google-apps.document';
+        else if (file.extension === 'pdf') mimeType = 'application/pdf';
+        else if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) mimeType = `image/${file.extension === 'jpg' ? 'jpeg' : file.extension}`;
 
         if (entry) {
             // Update existing
             if (file.extension === 'md') {
-                // For GDocs, we might need to delete and recreate to apply conversion properly, 
-                // or use batchUpdate with replacement.
-                // Since our converter generates a "new doc" structure, updating an existing doc is complex 
-                // (clearing it first).
-                // Strategy: Delete content and insert new.
-                // But driveClient.updateFile only does media update.
-                // For GDocs, we need Docs API.
-                // Let's use a helper in DriveClient or just recreate for now (simplest for MVP).
-                // Actually, recreating changes the ID, which breaks links if we had them.
-                // Better: Use Docs API to clear and insert.
-                // For now, let's just upload as new version (media update) if it wasn't a GDoc, 
-                // but since it IS a GDoc, we can't just "upload" markdown to it via Drive API update easily 
-                // without converting again.
-                // Google Drive API v3 'update' allows converting new content? Yes, if uploadType=multipart.
-
-                await this.driveClient.updateFile(entry.driveId, content, 'application/vnd.google-apps.document');
+                await this.driveClient.updateFile(entry.driveId, content, mimeType);
             } else {
-                // Binary/Other file
-                // We need to read binary for non-text files.
-                // But app.vault.read() returns string. readBinary() returns ArrayBuffer.
-                // For now, let's skip binary or handle text only.
-                // The requirements say "convert Markdown files".
-                await this.driveClient.updateFile(entry.driveId, content, 'text/plain');
+                await this.driveClient.updateFile(entry.driveId, content, mimeType);
             }
 
-            // Update index
             this.syncIndex[file.path] = {
                 ...entry,
                 hash: hash,
@@ -117,16 +176,7 @@ export class SyncManager {
             // Create new
             let driveId: string;
             if (file.extension === 'md') {
-                // Convert to GDoc
-                // Wait, the driveClient.uploadFile handles conversion if mimeType is set.
-                // But we need to pass the *raw markdown* and let Drive convert it?
-                // OR we use our `convertToGoogleDocs` and use Docs API?
-                // The README said: "Convertit en documents Google Docs... via API batch requests".
-                // So we should create a blank doc and then apply requests.
-
-                driveId = await this.driveClient.uploadFile(file.basename, '', 'application/vnd.google-apps.document', parentId);
-
-                // Now apply content
+                driveId = await this.driveClient.uploadFile(file.basename, '', mimeType, parentId);
                 const requests = convertToGoogleDocs(content);
                 if (requests.length > 0) {
                     const docs = this.driveClient.getDocs();
@@ -138,8 +188,7 @@ export class SyncManager {
                     });
                 }
             } else {
-                // Upload as is
-                driveId = await this.driveClient.uploadFile(file.name, content, 'text/plain', parentId);
+                driveId = await this.driveClient.uploadFile(file.name, content, mimeType, parentId);
             }
 
             this.syncIndex[file.path] = {
@@ -149,24 +198,16 @@ export class SyncManager {
                 lastModified: file.stat.mtime
             };
         }
+        return true;
     }
 
     private async ensureFolderStructure(path: string): Promise<string | undefined> {
         if (!path || path === '/') return undefined; // Root
 
-        // Check if we have this folder mapped
-        // We should probably map folders in the index too or a separate index.
-        // For simplicity, let's lookup by name in Drive (slow) or cache it.
-        // Let's assume flat for now or simple lookup.
-        // To do it right: split path, traverse.
-
         const parts = path.split('/');
         let parentId: string | undefined = undefined;
 
         for (const part of parts) {
-            // Check if we have a folder ID for this part under parentId
-            // We can cache this in memory during sync.
-            // For now, let's use getFileId (which does a search).
             let folderId = await this.driveClient.getFileId(part, parentId);
             if (!folderId) {
                 folderId = await this.driveClient.createFolder(part, parentId);

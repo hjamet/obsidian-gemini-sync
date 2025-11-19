@@ -123,7 +123,7 @@ export class DriveClient {
      * Uploads a file to Google Drive.
      * @returns The ID of the uploaded file.
      */
-    async uploadFile(name: string, content: string, mimeType: string, parentId?: string): Promise<string> {
+    async uploadFile(name: string, content: any, mimeType: string, parentId?: string): Promise<string> {
         const drive = this.getDrive();
         const fileMetadata: any = {
             name: name,
@@ -153,7 +153,7 @@ export class DriveClient {
     /**
      * Updates an existing file in Google Drive.
      */
-    async updateFile(fileId: string, content: string, mimeType: string): Promise<void> {
+    async updateFile(fileId: string, content: any, mimeType: string): Promise<void> {
         const drive = this.getDrive();
 
         // If it's a Google Doc, we might need to use the Docs API for content updates if we want to preserve formatting,
