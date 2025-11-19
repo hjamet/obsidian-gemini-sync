@@ -159,6 +159,10 @@ Pour utiliser ce plugin, vous devez configurer un projet Google Cloud et créer 
   - *Rôle* : Définit la version, l'ID, les dépendances Obsidian minimales
   - *Points d'attention* : Mise à jour de la version à chaque release
 
+- `data.json` : Configuration et État local
+  - *Rôle* : Stocke les tokens OAuth (sensibles) et l'index de synchronisation.
+  - *Points d'attention* : **NE JAMAIS COMMITER CE FICHIER**. Il est ajouté au `.gitignore`.
+
 - `[package.json](mdc:package.json)` : Dépendances et scripts
   - *Rôle* : Liste les dépendances npm (googleapis, obsidian, etc.) et les scripts de build
   - *Points d'attention* : Mises à jour des dépendances, scripts de développement
