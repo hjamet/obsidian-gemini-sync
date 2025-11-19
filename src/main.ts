@@ -109,6 +109,10 @@ export default class GeminiSyncPlugin extends Plugin {
                 await this.saveSettings();
             }
         });
+
+        if (this.syncManager) {
+            this.syncManager.updateDriveClient(this.driveClient);
+        }
     }
 
     configurePeriodicSync() {

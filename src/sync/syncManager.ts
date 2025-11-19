@@ -34,6 +34,11 @@ export class SyncManager {
         this.settings = settings;
     }
 
+    public updateDriveClient(driveClient: DriveClient) {
+        this.driveClient = driveClient;
+        this.manifestManager = new ManifestManager(driveClient);
+    }
+
     public cancelSync() {
         if (this.isSyncing) {
             this.cancelRequested = true;
