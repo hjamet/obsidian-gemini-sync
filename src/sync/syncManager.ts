@@ -455,7 +455,12 @@ export class SyncManager {
             return syncInstance.status;
         };
 
-        if (getStatus() !== 'syncing') return;
+        // États considérés comme "finis" ou ne nécessitant pas d'attente
+        const isInactive = (s: string) => ['fully_synced', 'paused', 'error'].includes(s);
+
+        const currentStatus = getStatus();
+        // Si le statut est indéfini (non chargé) ou inactif, on n'attend pas
+        if (!currentStatus || isInactive(currentStatus)) return;
 
         this.updateStatus('Waiting for Obsidian Sync...', undefined, true);
         // console.log('Gemini Sync: Waiting for Obsidian Sync to finish...');
@@ -474,7 +479,7 @@ export class SyncManager {
                     return;
                 }
 
-                if (status !== 'syncing' || checks >= maxChecks) {
+                if (isInactive(status) || checks >= maxChecks) {
                     clearInterval(interval);
                     if (checks >= maxChecks) {
                         new Notice('Gemini Sync: Timed out waiting for Obsidian Sync. Proceeding...');
