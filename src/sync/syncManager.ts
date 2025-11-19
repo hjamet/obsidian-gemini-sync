@@ -3,6 +3,7 @@ import { DriveClient } from '../drive/driveClient';
 import * as CryptoJS from 'crypto-js';
 import { GeminiSyncSettings } from '../main';
 import { ManifestManager, RemoteEntry, RemoteManifest } from './remoteManifest';
+import { pLimit } from './concurrency';
 
 export class SyncManager {
     app: App;
@@ -150,125 +151,134 @@ export class SyncManager {
             // Set pour suivre quels fichiers distants sont toujours valides
             const keptRemotePaths = new Set<string>();
 
-            // 3. Phase de Propagation (Local -> Drive)
+            // Concurrency Limit
+            const limit = pLimit(5); // 5 concurrent uploads
+            const promises: Promise<void>[] = [];
+
+            // Group files by parent folder for batch caching
+            const filesByFolder = new Map<string, TFile[]>();
             for (const file of filesToSync) {
-                if (this.cancelRequested) break;
-                processedCount++;
-                const percentage = Math.round((processedCount / totalFiles) * 100);
-                this.updateStatus(`Gemini Sync: Syncing ${processedCount}/${totalFiles} (${percentage}%)`, undefined, true);
-
-                try {
-                    // Calculer le hash local
-                    const localHash = await this.calculateFileHash(file);
-                    let remoteEntry = remoteManifest.files[file.path];
-
-                    // SMART RECOVERY: Si le fichier n'est pas dans le manifeste, vérifier s'il existe sur Drive
-                    if (!remoteEntry) {
-                        try {
-                            const parentId = await this.ensureFolderStructure(file.parent?.path || '');
-                            // Markdown files (Google Docs) use basename (no extension), binaries use full name
-                            const searchName = file.extension === 'md' ? file.basename : file.name;
-                            
-                            const existingFile = await this.driveClient.getFileMetadataByName(searchName, parentId);
-
-                            if (existingFile) {
-                                let isUpToDate = false;
-
-                                if (file.extension === 'md') {
-                                    // Pour Google Docs (Markdown), pas de MD5. On vérifie la date de modif.
-                                    // Si Remote >= Local, on considère à jour (évite ré-upload inutile).
-                                    // Note: Drive modifiedTime est une string ISO.
-                                    const remoteModTime = existingFile.modifiedTime ? new Date(existingFile.modifiedTime).getTime() : 0;
-                                    if (remoteModTime > file.stat.mtime) {
-                                        isUpToDate = true;
-                                    }
-                                } else {
-                                    // Pour les binaires (Images/PDF), on compare le MD5
-                                    if (existingFile.md5Checksum === localHash) {
-                                        isUpToDate = true;
-                                    }
-                                }
-
-                                if (isUpToDate) {
-                                    // RECOVERY SUCCESS: On met à jour le manifeste et on saute l'upload
-                                    remoteManifest.files[file.path] = {
-                                        path: file.path,
-                                        driveId: existingFile.id,
-                                        hash: localHash,
-                                        modifiedTime: Date.now()
-                                    };
-                                    
-                                    // Mise à jour de l'index local pour persistance
-                                    this.settings.syncIndex[file.path] = {
-                                        path: file.path,
-                                        driveId: existingFile.id,
-                                        hash: localHash,
-                                        lastModified: file.stat.mtime
-                                    };
-                                    
-                                    remoteEntry = remoteManifest.files[file.path];
-                                    // console.log(`[Smart Recovery] Recovered ${file.path}`);
-                                } else {
-                                    // EXISTS BUT DIFFERENT: On met à jour le manifeste avec le bon ID pour forcer un UPDATE au lieu d'un CREATE
-                                    remoteManifest.files[file.path] = {
-                                        path: file.path,
-                                        driveId: existingFile.id,
-                                        hash: 'mismatch', // Force update
-                                        modifiedTime: 0
-                                    };
-                                    remoteEntry = remoteManifest.files[file.path];
-                                }
-                            }
-                        } catch (recErr) {
-                            console.error(`Smart recovery failed for ${file.path}:`, recErr);
-                        }
-                    }
-
-                    // Décision : Upload si inexistant ou modifié
-                    if (!remoteEntry || remoteEntry.hash !== localHash) {
-                        // if (!remoteEntry) console.log(`[Sync] New file: ${file.path}`);
-                        // else console.log(`[Sync] Modified file: ${file.path}`);
-
-                        await this.uploadFile(file, rootId, remoteManifest);
-                    } else {
-                        // Identique : on garde l'entrée telle quelle
-                        // (Optionnel : mettre à jour mtime si besoin, mais pas critique pour le miroir)
-                    }
-
-                    // Marquer comme "vu et conservé"
-                    keptRemotePaths.add(file.path);
-
-                } catch (err) {
-                    console.error(`Failed to sync ${file.path}:`, err);
-                    new Notice(`Failed to sync ${file.path}`);
+                const parentPath = file.parent?.path || '';
+                if (!filesByFolder.has(parentPath)) {
+                    filesByFolder.set(parentPath, []);
                 }
+                filesByFolder.get(parentPath)!.push(file);
             }
 
+            // Incremental Save State
+            let lastSaveTime = Date.now();
+            let filesSinceLastSave = 0;
+
+            // 3. Phase de Propagation (Local -> Drive) - Grouped by Folder
+            for (const [folderPath, folderFiles] of filesByFolder) {
+                if (this.cancelRequested) break;
+
+                // Ensure folder exists and cache its ID
+                const parentId = await this.ensureFolderStructure(folderPath);
+
+                // Pre-fetch all files in this remote folder (Batching)
+                const remoteFolderCache = await this.driveClient.listFilesInFolder(parentId);
+
+                for (const file of folderFiles) {
+                    if (this.cancelRequested) break;
+
+                    promises.push(limit(async () => {
+                        if (this.cancelRequested) return;
+
+                        try {
+                            processedCount++;
+                            const percentage = Math.round((processedCount / totalFiles) * 100);
+                            this.updateStatus(`Gemini Sync: Syncing ${processedCount}/${totalFiles} (${percentage}%)`, undefined, true);
+
+                            // Calculer le hash local
+                            const localHash = await this.calculateFileHash(file);
+                            let remoteEntry = remoteManifest!.files[file.path];
+
+                            // SMART RECOVERY (Instant check via cache)
+                            if (!remoteEntry) {
+                                const searchName = file.extension === 'md' ? file.basename : file.name;
+                                const existingFile = remoteFolderCache.get(searchName);
+
+                                if (existingFile) {
+                                    let isUpToDate = false;
+                                    if (file.extension === 'md') {
+                                        const remoteModTime = existingFile.modifiedTime ? new Date(existingFile.modifiedTime).getTime() : 0;
+                                        if (remoteModTime > file.stat.mtime) isUpToDate = true;
+                                    } else {
+                                        if (existingFile.md5Checksum === localHash) isUpToDate = true;
+                                    }
+
+                                    if (isUpToDate) {
+                                        remoteManifest!.files[file.path] = {
+                                            path: file.path,
+                                            driveId: existingFile.id,
+                                            hash: localHash,
+                                            modifiedTime: Date.now()
+                                        };
+                                        this.settings.syncIndex[file.path] = {
+                                            path: file.path,
+                                            driveId: existingFile.id,
+                                            hash: localHash,
+                                            lastModified: file.stat.mtime
+                                        };
+                                        remoteEntry = remoteManifest!.files[file.path];
+                                    } else {
+                                        // Force update logic
+                                        remoteManifest!.files[file.path] = {
+                                            path: file.path,
+                                            driveId: existingFile.id,
+                                            hash: 'mismatch',
+                                            modifiedTime: 0
+                                        };
+                                        remoteEntry = remoteManifest!.files[file.path];
+                                    }
+                                }
+                            }
+
+                            // Décision : Upload si inexistant ou modifié
+                            if (!remoteEntry || remoteEntry.hash !== localHash) {
+                                await this.uploadFile(file, rootId, remoteManifest!);
+                            }
+
+                            keptRemotePaths.add(file.path);
+
+                            // Incremental Save Check
+                            filesSinceLastSave++;
+                            const now = Date.now();
+                            if (filesSinceLastSave >= 50 || (now - lastSaveTime > 30000)) { // Every 50 files or 30s
+                                filesSinceLastSave = 0;
+                                lastSaveTime = now;
+                                await this.manifestManager.saveManifest(rootId, remoteManifest!);
+                                await this.onSaveSettings();
+                            }
+
+                        } catch (err) {
+                            console.error(`Failed to sync ${file.path}:`, err);
+                            new Notice(`Failed to sync ${file.path}`);
+                        }
+                    }));
+                }
+                // Wait for all tasks in this folder (optional, but safer for structure)
+                // Actually, better to let them run concurrently globally
+            }
+
+            // Wait for all file uploads to finish
+            await Promise.all(promises);
+
             // 4. Phase de Nettoyage (Drive -> Poubelle)
-            // On supprime du Drive tout ce qui est dans le manifeste mais PAS dans keptRemotePaths
             if (!this.cancelRequested) {
                 this.updateStatus('Gemini Sync: Cleaning remote...', undefined, true);
 
                 const remotePaths = Object.keys(remoteManifest.files);
                 for (const remotePath of remotePaths) {
-                    // Si le fichier n'a pas été vu lors du scan local...
                     if (!keptRemotePaths.has(remotePath)) {
-
-                        // Sécurité : vérifier si le fichier est dans un dossier exclu
-                        // (Si on a exclu le dossier localement, on ne veut peut-être pas le supprimer du Drive ?)
-                        // Dans une logique "Miroir Strict", on devrait le supprimer. 
-                        // Mais si on veut juste "ignorer", on ajoute cette condition :
                         const isExcluded = excludedFolders.some(ex => remotePath === ex || remotePath.startsWith(ex + '/'));
-
                         if (!isExcluded) {
-                            // console.log(`[Sync] Deleting remote orphan: ${remotePath}`);
                             try {
                                 const entry = remoteManifest.files[remotePath];
-                                // Pass rootId as scopeId to enable security check (prevents deletion outside vault folder)
                                 await this.driveClient.deleteFile(entry.driveId, rootId);
-                                // Retirer du manifeste
                                 delete remoteManifest.files[remotePath];
-                                delete this.settings.syncIndex[remotePath]; // Nettoyer l'index local aussi
+                                delete this.settings.syncIndex[remotePath];
                             } catch (e) {
                                 console.error(`Failed to delete remote file ${remotePath}:`, e);
                             }
@@ -286,6 +296,9 @@ export class SyncManager {
             } else {
                 new Notice('Gemini Sync: Cancelled.');
                 this.updateStatus('Gemini Sync: Cancelled', 5000);
+                // Save progress even on cancel
+                await this.manifestManager.saveManifest(rootId, remoteManifest);
+                await this.onSaveSettings();
             }
 
         } catch (globalError) {

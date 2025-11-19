@@ -389,6 +389,50 @@ export class DriveClient {
     }
 
     /**
+     * Lists all files in a specific folder with their metadata.
+     * Uses pagination to retrieve all files.
+     * Returns a Map<filename, metadata> for efficient lookup.
+     */
+    async listFilesInFolder(folderId: string): Promise<Map<string, { id: string, modifiedTime?: string, md5Checksum?: string }>> {
+        const drive = this.getDrive();
+        const fileMap = new Map<string, { id: string, modifiedTime?: string, md5Checksum?: string }>();
+        let pageToken: string | undefined = undefined;
+
+        try {
+            do {
+                const res: any = await drive.files.list({
+                    q: `'${folderId}' in parents and trashed = false`,
+                    fields: 'nextPageToken, files(id, name, modifiedTime, md5Checksum)',
+                    spaces: 'drive',
+                    pageToken: pageToken,
+                    pageSize: 1000 // Maximize page size to reduce requests
+                });
+
+                if (res.data.files) {
+                    for (const file of res.data.files) {
+                        if (file.name && file.id) {
+                            fileMap.set(file.name, {
+                                id: file.id,
+                                modifiedTime: file.modifiedTime,
+                                md5Checksum: file.md5Checksum
+                            });
+                        }
+                    }
+                }
+
+                pageToken = res.data.nextPageToken;
+            } while (pageToken);
+
+        } catch (error) {
+            console.error(`Failed to list files in folder ${folderId}:`, error);
+            // We return a partial or empty map instead of throwing to avoid breaking the whole sync
+            // If listing fails, smart recovery will just not work for this folder (fallback to individual checks or upload)
+        }
+
+        return fileMap;
+    }
+
+    /**
      * Downloads the content of a file as text.
      */
     async getFileContent(fileId: string): Promise<string | null> {

@@ -56,28 +56,37 @@ export class ManifestManager {
             // Minified JSON for compression/size optimization
             const content = JSON.stringify(manifest);
             
+            // Si manifestId est connu, on tente l'update
             if (this.manifestId) {
-                await this.driveClient.updateFile(this.manifestId, content, 'application/json');
-            } else {
-                // Check again just in case (rare race condition)
-                const existingId = await this.driveClient.getFileId(
-                    ManifestManager.MANIFEST_FILE_NAME, 
-                    rootFolderId, 
-                    'application/json'
-                );
-
-                if (existingId) {
-                    this.manifestId = existingId;
-                    await this.driveClient.updateFile(existingId, content, 'application/json');
-                } else {
-                    this.manifestId = await this.driveClient.uploadFile(
-                        ManifestManager.MANIFEST_FILE_NAME,
-                        content,
-                        'application/json',
-                        rootFolderId
-                    );
+                try {
+                    await this.driveClient.updateFile(this.manifestId, content, 'application/json');
+                    return;
+                } catch (e) {
+                    console.warn('Failed to update manifest by ID, falling back to search/create', e);
+                    // Si l'update échoue (ex: fichier supprimé entre temps), on reset l'ID et on repart sur la logique de recherche/création
+                    this.manifestId = null;
                 }
             }
+
+            // Logique de secours : Recherche ou Création
+            const existingId = await this.driveClient.getFileId(
+                ManifestManager.MANIFEST_FILE_NAME, 
+                rootFolderId, 
+                'application/json'
+            );
+
+            if (existingId) {
+                this.manifestId = existingId;
+                await this.driveClient.updateFile(existingId, content, 'application/json');
+            } else {
+                this.manifestId = await this.driveClient.uploadFile(
+                    ManifestManager.MANIFEST_FILE_NAME,
+                    content,
+                    'application/json',
+                    rootFolderId
+                );
+            }
+            
         } catch (error) {
             console.error('Failed to save remote manifest:', error);
             throw error;
