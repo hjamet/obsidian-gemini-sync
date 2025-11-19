@@ -121,7 +121,7 @@ export class SyncManager {
             this.updateStatus('Gemini Sync: Initializing...', undefined, true);
 
             const rootId = await this.getVaultRoot();
-            
+
             // 1. Charger le Manifeste Distant (État actuel du Drive)
             let remoteManifest = await this.manifestManager.loadManifest(rootId);
             if (!remoteManifest) {
@@ -131,7 +131,7 @@ export class SyncManager {
             // 2. Préparer la liste des fichiers locaux (Source de Vérité)
             const localFiles = this.app.vault.getFiles();
             const excludedFolders = this.settings.excludedFolders || [];
-            
+
             // Filtrer les fichiers exclus
             const filesToSync = localFiles.filter(file => {
                 if (excludedFolders.some(ex => file.path === ex || file.path.startsWith(ex + '/'))) return false;
@@ -143,7 +143,7 @@ export class SyncManager {
 
             const totalFiles = filesToSync.length;
             let processedCount = 0;
-            
+
             // Set pour suivre quels fichiers distants sont toujours valides
             const keptRemotePaths = new Set<string>();
 
@@ -162,7 +162,7 @@ export class SyncManager {
                     if (!remoteEntry || remoteEntry.hash !== localHash) {
                         if (!remoteEntry) console.log(`[Sync] New file: ${file.path}`);
                         else console.log(`[Sync] Modified file: ${file.path}`);
-                        
+
                         await this.uploadFile(file, rootId, remoteManifest);
                     } else {
                         // Identique : on garde l'entrée telle quelle
@@ -182,23 +182,24 @@ export class SyncManager {
             // On supprime du Drive tout ce qui est dans le manifeste mais PAS dans keptRemotePaths
             if (!this.cancelRequested) {
                 this.updateStatus('Gemini Sync: Cleaning remote...', undefined, true);
-                
+
                 const remotePaths = Object.keys(remoteManifest.files);
                 for (const remotePath of remotePaths) {
                     // Si le fichier n'a pas été vu lors du scan local...
                     if (!keptRemotePaths.has(remotePath)) {
-                        
+
                         // Sécurité : vérifier si le fichier est dans un dossier exclu
                         // (Si on a exclu le dossier localement, on ne veut peut-être pas le supprimer du Drive ?)
                         // Dans une logique "Miroir Strict", on devrait le supprimer. 
                         // Mais si on veut juste "ignorer", on ajoute cette condition :
                         const isExcluded = excludedFolders.some(ex => remotePath === ex || remotePath.startsWith(ex + '/'));
-                        
+
                         if (!isExcluded) {
                             console.log(`[Sync] Deleting remote orphan: ${remotePath}`);
                             try {
                                 const entry = remoteManifest.files[remotePath];
-                                await this.driveClient.deleteFile(entry.driveId);
+                                // Pass rootId as scopeId to enable security check (prevents deletion outside vault folder)
+                                await this.driveClient.deleteFile(entry.driveId, rootId);
                                 // Retirer du manifeste
                                 delete remoteManifest.files[remotePath];
                                 delete this.settings.syncIndex[remotePath]; // Nettoyer l'index local aussi
@@ -233,14 +234,14 @@ export class SyncManager {
     private async uploadFile(file: TFile, rootId: string, manifest: RemoteManifest) {
         const content = await this.getFileContent(file);
         const hash = await this.calculateFileHash(file);
-        
+
         let mimeType = 'application/octet-stream';
         if (file.extension === 'md') mimeType = 'application/vnd.google-apps.document';
         else if (file.extension === 'pdf') mimeType = 'application/pdf';
         else if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) mimeType = `image/${file.extension === 'jpg' ? 'jpeg' : file.extension}`;
 
         const parentId = await this.ensureFolderStructure(file.parent?.path || '');
-        
+
         const existingEntry = manifest.files[file.path];
         let driveId: string;
 
@@ -251,10 +252,10 @@ export class SyncManager {
             // Check if file exists on drive to avoid dups (stale manifest case)
             // Or just upload new. Trust manifest? 
             // Let's trust manifest for speed, but maybe check if ID is null
-             driveId = await this.driveClient.uploadFile(
-                file.extension === 'md' ? file.basename : file.name, 
-                content, 
-                mimeType, 
+            driveId = await this.driveClient.uploadFile(
+                file.extension === 'md' ? file.basename : file.name,
+                content,
+                mimeType,
                 parentId
             );
         }
