@@ -21,6 +21,8 @@ export class SyncManager {
     settings: GeminiSyncSettings;
     syncIndex: SyncIndex = {};
     statusBarItem: HTMLElement | null = null;
+    isSyncing: boolean = false;
+    cancelRequested: boolean = false;
 
     constructor(app: App, driveClient: DriveClient, settings: GeminiSyncSettings, statusBarItem?: HTMLElement) {
         this.app = app;
@@ -33,9 +35,35 @@ export class SyncManager {
         this.settings = settings;
     }
 
-    private updateStatus(message: string, timeout?: number) {
+    public cancelSync() {
+        if (this.isSyncing) {
+            this.cancelRequested = true;
+            this.updateStatus('Gemini Sync: Cancelling...', undefined, false);
+            new Notice('Gemini Sync: Cancellation requested...');
+        }
+    }
+
+    private updateStatus(message: string, timeout?: number, showCancel: boolean = false) {
         if (this.statusBarItem) {
-            this.statusBarItem.setText(message);
+            this.statusBarItem.empty();
+            
+            const msgSpan = this.statusBarItem.createEl('span', { text: message });
+            
+            if (showCancel) {
+                const btn = this.statusBarItem.createEl('span', { cls: 'status-bar-item-segment' });
+                btn.style.marginLeft = '10px';
+                btn.style.cursor = 'pointer';
+                btn.style.color = 'var(--text-error)'; // Make it look like a cancel action
+                btn.setText("Cancel"); 
+                btn.setAttribute('aria-label', 'Cancel Sync');
+                
+                btn.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.cancelSync();
+                };
+            }
+
             if (timeout) {
                 setTimeout(() => {
                     // Only clear if the message hasn't changed
@@ -48,54 +76,74 @@ export class SyncManager {
     }
 
     public async syncVault() {
+        if (this.isSyncing) {
+            new Notice('Gemini Sync: Already in progress.');
+            return;
+        }
+
         if (!this.driveClient.isReady()) {
             new Notice('Gemini Sync: Not authenticated. Please check settings.');
             return;
         }
 
-        new Notice('Gemini Sync: Starting synchronization...');
-        this.updateStatus('Gemini Sync: Starting...');
+        this.isSyncing = true;
+        this.cancelRequested = false;
 
-        const files = this.app.vault.getFiles();
-        
-        // Parse excluded folders
-        const excludedFolders = this.settings.excludedFolders
-            ? this.settings.excludedFolders.split('\n').map(p => p.trim()).filter(p => p.length > 0)
-            : [];
+        try {
+            new Notice('Gemini Sync: Starting synchronization...');
+            this.updateStatus('Gemini Sync: Starting...', undefined, true);
 
-        const filesToSync = files.filter(file => {
-            // Check if file is in an excluded folder
-            if (excludedFolders.some(excluded => file.path.startsWith(excluded))) {
-                return false;
-            }
-
-            // Check file types based on settings
-            if (file.extension === 'md') return true;
-            if (file.extension === 'pdf') return this.settings.syncPDFs;
-            if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) return this.settings.syncImages;
+            const files = this.app.vault.getFiles();
             
-            return false; // Skip other types
-        });
+            // Parse excluded folders
+            const excludedFolders = this.settings.excludedFolders
+                ? this.settings.excludedFolders.split('\n').map(p => p.trim()).filter(p => p.length > 0)
+                : [];
 
-        const totalFiles = filesToSync.length;
-        let processedFiles = 0;
-        this.updateStatus(`Gemini Sync: 0/${totalFiles} (0%)`);
+            const filesToSync = files.filter(file => {
+                // Check if file is in an excluded folder
+                if (excludedFolders.some(excluded => file.path.startsWith(excluded))) {
+                    return false;
+                }
 
-        for (const file of filesToSync) {
-            try {
-                await this.syncFile(file);
-            } catch (error) {
-                console.error(`Failed to sync file ${file.path}:`, error);
-                new Notice(`Failed to sync ${file.path}`);
-            } finally {
-                processedFiles++;
-                const percent = Math.round((processedFiles / totalFiles) * 100);
-                this.updateStatus(`Gemini Sync: ${processedFiles}/${totalFiles} (${percent}%)`);
+                // Check file types based on settings
+                if (file.extension === 'md') return true;
+                if (file.extension === 'pdf') return this.settings.syncPDFs;
+                if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) return this.settings.syncImages;
+                
+                return false; // Skip other types
+            });
+
+            const totalFiles = filesToSync.length;
+            let processedFiles = 0;
+            this.updateStatus(`Gemini Sync: 0/${totalFiles} (0%)`, undefined, true);
+
+            for (const file of filesToSync) {
+                if (this.cancelRequested) {
+                    new Notice('Gemini Sync: Synchronization cancelled.');
+                    this.updateStatus('Gemini Sync: Cancelled', 5000);
+                    return;
+                }
+
+                try {
+                    await this.syncFile(file);
+                } catch (error) {
+                    console.error(`Failed to sync file ${file.path}:`, error);
+                    new Notice(`Failed to sync ${file.path}`);
+                } finally {
+                    processedFiles++;
+                    const percent = Math.round((processedFiles / totalFiles) * 100);
+                    if (!this.cancelRequested) {
+                        this.updateStatus(`Gemini Sync: ${processedFiles}/${totalFiles} (${percent}%)`, undefined, true);
+                    }
+                }
             }
-        }
 
-        new Notice('Gemini Sync: Synchronization complete!');
-        this.updateStatus('Gemini Sync: Ready', 5000);
+            new Notice('Gemini Sync: Synchronization complete!');
+            this.updateStatus('Gemini Sync: Ready', 5000);
+        } finally {
+            this.isSyncing = false;
+        }
     }
 
     private async syncFile(file: TFile): Promise<boolean> {
