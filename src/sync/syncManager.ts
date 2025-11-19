@@ -99,10 +99,14 @@ export class SyncManager {
             const excludedFolders = Array.isArray(this.settings.excludedFolders) 
                 ? this.settings.excludedFolders 
                 : [];
+            
+            console.log('Gemini Sync: Starting sync with excluded folders:', excludedFolders);
 
             const filesToSync = files.filter(file => {
-                // Check if file is in an excluded folder
-                if (excludedFolders.some(excluded => file.path.startsWith(excluded))) {
+                // Check if file is in an excluded folder (strict match or subfolder)
+                if (excludedFolders.some(excluded => 
+                    file.path === excluded || file.path.startsWith(excluded + '/')
+                )) {
                     return false;
                 }
 
