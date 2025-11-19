@@ -3,7 +3,7 @@
     "name": "Gemini Sync",
     "version": "1.0.0",
     "minAppVersion": "0.15.0",
-    "description": "One-way synchronization from Obsidian to Google Drive with GDocs conversion.",
+    "description": "Unidirectional synchronization from Obsidian to Google Drive with automatic Markdown to Google Docs conversion for Gemini compatibility.",
     "author": "Antigravity",
     "authorUrl": "https://github.com/yourname/gemini-sync",
     "isDesktopOnly": true
