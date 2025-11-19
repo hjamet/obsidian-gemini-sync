@@ -241,7 +241,9 @@ export class DriveClient {
      */
     async getFileId(name: string, parentId?: string, mimeType?: string): Promise<string | null> {
         const drive = this.getDrive();
-        let query = `name = '${name}' and trashed = false`;
+        // Escape single quotes in filename to prevent query syntax errors
+        const escapedName = name.replace(/'/g, "\\'");
+        let query = `name = '${escapedName}' and trashed = false`;
         if (parentId) {
             query += ` and '${parentId}' in parents`;
         }
