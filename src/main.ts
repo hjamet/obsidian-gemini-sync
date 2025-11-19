@@ -111,6 +111,18 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     new SetupWizardModal(this.app, this.plugin).open();
                 }));
 
+
+        new Setting(containerEl)
+            .setName('Dossier distant')
+            .setDesc('Chemin du dossier sur Google Drive (ex: Backups/MonCoffre). Laisser vide pour la racine.')
+            .addText(text => text
+                .setPlaceholder('Ex: Obsidian/MonCoffre')
+                .setValue(this.plugin.settings.remoteFolderPath)
+                .onChange(async (value) => {
+                    this.plugin.settings.remoteFolderPath = value;
+                    await this.plugin.saveSettings();
+                }));
+
         containerEl.createEl('hr');
         containerEl.createEl('h3', { text: 'Configuration Manuelle' });
 
@@ -136,16 +148,7 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
-            .setName('Dossier distant')
-            .setDesc('Chemin du dossier sur Google Drive (ex: Backups/MonCoffre). Laisser vide pour la racine.')
-            .addText(text => text
-                .setPlaceholder('Ex: Obsidian/MonCoffre')
-                .setValue(this.plugin.settings.remoteFolderPath)
-                .onChange(async (value) => {
-                    this.plugin.settings.remoteFolderPath = value;
-                    await this.plugin.saveSettings();
-                }));
+
 
         containerEl.createEl('h3', { text: 'Authentication' });
 
