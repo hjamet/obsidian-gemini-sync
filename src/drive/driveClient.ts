@@ -107,7 +107,7 @@ export class DriveClient {
             name: name,
             mimeType: 'application/vnd.google-apps.folder',
         };
-        if (parentId) {
+        if (parentId && parentId !== 'root') {
             fileMetadata.parents = [parentId];
         }
 
@@ -129,7 +129,7 @@ export class DriveClient {
         const fileMetadata: any = {
             name: name,
         };
-        if (parentId) {
+        if (parentId && parentId !== 'root') {
             fileMetadata.parents = [parentId];
         }
         if (mimeType === 'application/vnd.google-apps.document') {
@@ -137,11 +137,11 @@ export class DriveClient {
         }
 
         let body = content;
-        
+
         // Handle Buffer specifically by converting to Blob
         if (Buffer.isBuffer(content)) {
-             const blob = new Blob([content], { type: mimeType });
-             return this.uploadFileResumable(name, blob, mimeType, parentId);
+            const blob = new Blob([content], { type: mimeType });
+            return this.uploadFileResumable(name, blob, mimeType, parentId);
         }
 
         const media = {
@@ -170,9 +170,9 @@ export class DriveClient {
     async updateFile(fileId: string, content: any, mimeType: string): Promise<void> {
         // Handle Buffer specifically
         if (Buffer.isBuffer(content)) {
-             const blob = new Blob([content], { type: mimeType });
-             await this.updateFileResumable(fileId, blob, mimeType);
-             return;
+            const blob = new Blob([content], { type: mimeType });
+            await this.updateFileResumable(fileId, blob, mimeType);
+            return;
         }
 
         const drive = this.getDrive();
@@ -204,7 +204,7 @@ export class DriveClient {
             if (!accessToken) throw new Error('No access token available');
 
             const metadata: any = { name };
-            if (parentId) metadata.parents = [parentId];
+            if (parentId && parentId !== 'root') metadata.parents = [parentId];
 
             // 1. Initiate Resumable Session
             const initRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
@@ -230,8 +230,8 @@ export class DriveClient {
             const uploadRes = await fetch(location, {
                 method: 'PUT',
                 headers: {
-                   'Content-Length': blob.size.toString(),
-                   'Content-Type': mimeType
+                    'Content-Length': blob.size.toString(),
+                    'Content-Type': mimeType
                 },
                 body: blob
             });
@@ -254,7 +254,7 @@ export class DriveClient {
      * Manual Resumable Update using fetch.
      */
     async updateFileResumable(fileId: string, blob: Blob, mimeType: string): Promise<void> {
-         try {
+        try {
             const tokenResponse = await this.oAuth2Client.getAccessToken();
             const accessToken = tokenResponse.token;
             if (!accessToken) throw new Error('No access token available');
@@ -283,8 +283,8 @@ export class DriveClient {
             const uploadRes = await fetch(location, {
                 method: 'PUT',
                 headers: {
-                   'Content-Length': blob.size.toString(),
-                   'Content-Type': mimeType
+                    'Content-Length': blob.size.toString(),
+                    'Content-Type': mimeType
                 },
                 body: blob
             });
@@ -399,7 +399,7 @@ export class DriveClient {
                 fileId: fileId,
                 alt: 'media',
             });
-            
+
             if (typeof res.data === 'string') return res.data;
             if (typeof res.data === 'object') return JSON.stringify(res.data);
             return String(res.data);
@@ -421,7 +421,7 @@ export class DriveClient {
             }, {
                 responseType: 'arraybuffer'
             });
-            
+
             return res.data as any as ArrayBuffer;
         } catch (error) {
             console.error(`Failed to download binary for ${fileId}:`, error);
