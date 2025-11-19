@@ -11,6 +11,8 @@ export class SyncManager {
     statusBarItem: HTMLElement | null = null;
     isSyncing: boolean = false;
     cancelRequested: boolean = false;
+    private rootFolderId: string | null = null;
+    private folderIdCache: Map<string, string> = new Map();
     onSaveSettings: () => Promise<void>;
 
     constructor(app: App, driveClient: DriveClient, settings: GeminiSyncSettings, statusBarItem: HTMLElement | undefined, onSaveSettings: () => Promise<void>) {
@@ -22,6 +24,10 @@ export class SyncManager {
     }
 
     public updateSettings(settings: GeminiSyncSettings) {
+        if (this.settings.remoteFolderPath !== settings.remoteFolderPath) {
+            this.rootFolderId = null;
+            this.folderIdCache.clear();
+        }
         this.settings = settings;
     }
 
@@ -42,9 +48,9 @@ export class SyncManager {
         this.isSyncing = true;
         try {
             this.updateStatus('Gemini Sync: Deleting remote folder...', undefined, false);
-            // 1. Find root folder
+            // 1. Find root folder (ensure we look at root to avoid ambiguity)
             const rootName = this.settings.remoteFolderPath || this.app.vault.getName();
-            const rootId = await this.driveClient.getFileId(rootName, undefined, 'application/vnd.google-apps.folder');
+            const rootId = await this.driveClient.getFileId(rootName, 'root', 'application/vnd.google-apps.folder');
 
             if (rootId) {
                 // 2. Delete it (soft delete with scope check)
@@ -52,6 +58,10 @@ export class SyncManager {
                 await this.driveClient.deleteFile(rootId, rootId);
                 new Notice('Remote folder deleted.');
             }
+
+            // Clear cache
+            this.rootFolderId = null;
+            this.folderIdCache.clear();
 
             // 3. Clear local index
             this.settings.syncIndex = {};
@@ -113,6 +123,7 @@ export class SyncManager {
 
         this.isSyncing = true;
         this.cancelRequested = false;
+        this.folderIdCache.clear(); // Clear folder cache at start of sync
 
         try {
             new Notice('Gemini Sync: Starting synchronization...');
@@ -265,12 +276,16 @@ export class SyncManager {
     }
 
     private async getVaultRoot(): Promise<string> {
+        if (this.rootFolderId) return this.rootFolderId;
+
         const rootName = this.settings.remoteFolderPath || this.app.vault.getName();
         // Check if root folder exists
-        let rootId = await this.driveClient.getFileId(rootName, undefined, 'application/vnd.google-apps.folder');
+        // Explicitly search in 'root' to avoid finding subfolders with the same name (prevents infinite recursion)
+        let rootId = await this.driveClient.getFileId(rootName, 'root', 'application/vnd.google-apps.folder');
         if (!rootId) {
             rootId = await this.driveClient.createFolder(rootName);
         }
+        this.rootFolderId = rootId;
         return rootId;
     }
 
@@ -279,15 +294,32 @@ export class SyncManager {
 
         if (!path || path === '/') return parentId;
 
+        // Optimization: Check cache first to avoid repeated API calls for files in same folder
+        if (this.folderIdCache.has(path)) {
+            return this.folderIdCache.get(path)!;
+        }
+
         const parts = path.split('/');
+        let currentPath = '';
 
         for (const part of parts) {
+            currentPath = currentPath ? `${currentPath}/${part}` : part;
+
+            // Check cache for this specific level
+            if (this.folderIdCache.has(currentPath)) {
+                parentId = this.folderIdCache.get(currentPath)!;
+                continue;
+            }
+
             // Check if we have a folder ID for this part under parentId
             let folderId = await this.driveClient.getFileId(part, parentId, 'application/vnd.google-apps.folder');
             if (!folderId) {
                 folderId = await this.driveClient.createFolder(part, parentId);
             }
             parentId = folderId;
+
+            // Cache this level
+            this.folderIdCache.set(currentPath, folderId);
         }
         return parentId;
     }
