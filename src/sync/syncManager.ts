@@ -120,6 +120,9 @@ export class SyncManager {
             new Notice('Gemini Sync: Starting strict mirror sync...');
             this.updateStatus('Gemini Sync: Initializing...', undefined, true);
 
+            // Wait for Obsidian Sync to finish if active
+            await this.waitForObsidianSync();
+
             const rootId = await this.getVaultRoot();
 
             // 1. Charger le Manifeste Distant (État actuel du Drive)
@@ -349,5 +352,58 @@ export class SyncManager {
             this.folderIdCache.set(currentPath, folderId);
         }
         return parentId;
+    }
+
+    private async waitForObsidianSync(): Promise<void> {
+        // Access internal API safely
+        const internalPlugins = (this.app as any).internalPlugins;
+        if (!internalPlugins) return;
+
+        const syncPlugin = internalPlugins.plugins['sync'];
+        if (!syncPlugin || !syncPlugin.enabled) return;
+
+        // Check if sync instance exists and has status
+        const syncInstance = syncPlugin.instance;
+        if (!syncInstance) return;
+
+        // Helper to get status
+        const getStatus = () => {
+            // status can be 'fully_synced', 'syncing', 'error', 'paused'
+            // We might need to inspect the DOM or internal state if 'status' property isn't directly exposed
+            // But usually syncInstance.status is the way.
+            return syncInstance.status;
+        };
+
+        if (getStatus() !== 'syncing') return;
+
+        this.updateStatus('Waiting for Obsidian Sync...', undefined, true);
+        // console.log('Gemini Sync: Waiting for Obsidian Sync to finish...');
+
+        return new Promise<void>((resolve) => {
+            let checks = 0;
+            const maxChecks = 30; // 30 seconds timeout
+
+            const interval = window.setInterval(() => {
+                checks++;
+                const status = getStatus();
+
+                if (this.cancelRequested) {
+                    clearInterval(interval);
+                    resolve();
+                    return;
+                }
+
+                if (status !== 'syncing' || checks >= maxChecks) {
+                    clearInterval(interval);
+                    if (checks >= maxChecks) {
+                        new Notice('Gemini Sync: Timed out waiting for Obsidian Sync. Proceeding...');
+                        // console.log('Gemini Sync: Timed out waiting for Obsidian Sync.');
+                    } else {
+                        // console.log('Gemini Sync: Obsidian Sync finished.');
+                    }
+                    resolve();
+                }
+            }, 1000);
+        });
     }
 }
