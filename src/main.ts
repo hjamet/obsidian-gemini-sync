@@ -102,10 +102,10 @@ class GeminiSyncSettingTab extends PluginSettingTab {
 
         // Wizard Button
         new Setting(containerEl)
-            .setName('Assistant de configuration')
-            .setDesc('Lancer le guide étape par étape pour configurer le plugin.')
+            .setName('Setup Wizard')
+            .setDesc('Launch the step-by-step guide to configure the plugin.')
             .addButton(button => button
-                .setButtonText('Lancer l\'assistant')
+                .setButtonText('Start Wizard')
                 .setCta()
                 .onClick(() => {
                     new SetupWizardModal(this.app, this.plugin).open();
@@ -113,10 +113,10 @@ class GeminiSyncSettingTab extends PluginSettingTab {
 
 
         new Setting(containerEl)
-            .setName('Dossier distant')
-            .setDesc('Chemin du dossier sur Google Drive (ex: Backups/MonCoffre). Laisser vide pour la racine.')
+            .setName('Remote Folder')
+            .setDesc('Path to the folder on Google Drive (e.g. Backups/MyVault). Leave empty for root.')
             .addText(text => text
-                .setPlaceholder('Ex: Obsidian/MonCoffre')
+                .setPlaceholder('e.g. Obsidian/MyVault')
                 .setValue(this.plugin.settings.remoteFolderPath)
                 .onChange(async (value) => {
                     this.plugin.settings.remoteFolderPath = value;
@@ -124,7 +124,7 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                 }));
 
         containerEl.createEl('hr');
-        containerEl.createEl('h3', { text: 'Configuration Manuelle' });
+        containerEl.createEl('h3', { text: 'Manual Configuration' });
 
         new Setting(containerEl)
             .setName('Client ID')
