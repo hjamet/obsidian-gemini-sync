@@ -1,310 +1,310 @@
-# Gemini Sync — Synchronisation Obsidian vers Google Drive
+# Gemini Sync — Obsidian to Google Drive Synchronization
 
-Plugin Obsidian qui synchronise unidirectionnellement votre coffre local vers Google Drive, en convertissant automatiquement les fichiers Markdown en documents Google Docs pour compatibilité avec Gemini.
+Obsidian plugin that unidirectionally synchronizes your local vault to Google Drive, automatically converting Markdown files to Google Docs for Gemini compatibility.
 
 ## Description
 
-Ce plugin effectue une synchronisation **unidirectionnelle** (Obsidian → Google Drive uniquement) pour que votre Drive reflète l'état exact de votre coffre Obsidian local. Les fichiers Markdown sont automatiquement convertis en documents Google Docs, permettant leur utilisation avec Gemini.
+This plugin performs **unidirectional** synchronization (Obsidian → Google Drive only) so that your Drive reflects the exact state of your local Obsidian vault. Markdown files are automatically converted to Google Docs, enabling their use with Gemini.
 
-## Fonctionnalités
+## Features
 
-- **Synchronisation unidirectionnelle** : Tous les fichiers du coffre Obsidian sont synchronisés vers Google Drive
-- **Synchronisation au démarrage** : Option configurable pour lancer la synchronisation à l'ouverture d'Obsidian
-- **Résilience aux redémarrages** : L'état de synchronisation est sauvegardé localement pour éviter les re-uploads inutiles après redémarrage
-- **Force Resync** : Bouton d'urgence pour réinitialiser complètement la synchronisation et nettoyer le dossier distant
-- **Conversion automatique** : Les fichiers `.md` sont convertis en documents Google Docs
-- **Support binaire** : Synchronisation fiable des PDFs et images (PDF, PNG, JPG, GIF)
-- **Détection des modifications** : Seuls les fichiers nouveaux ou modifiés sont synchronisés
-- **Annulation** : Possibilité d'annuler une synchronisation en cours via la barre d'état
-- **Gestion des dossiers** : La structure de dossiers est préservée sur Google Drive
-- **Authentification OAuth 2.0** : Sécurisée via Google Cloud
+- **Unidirectional synchronization** : All files in the Obsidian vault are synchronized to Google Drive
+- **Startup synchronization** : Configurable option to launch synchronization when Obsidian opens
+- **Restart resilience** : Synchronization state is saved locally to avoid unnecessary re-uploads after restart
+- **Force Resync** : Emergency button to completely reset synchronization and clean the remote folder
+- **Automatic conversion** : `.md` files are converted to Google Docs
+- **Binary support** : Reliable synchronization of PDFs and images (PDF, PNG, JPG, GIF)
+- **Change detection** : Only new or modified files are synchronized
+- **Cancellation** : Ability to cancel an ongoing synchronization via the status bar
+- **Folder management** : Folder structure is preserved on Google Drive
+- **OAuth 2.0 authentication** : Secured via Google Cloud
 
-## Architecture du dépôt
+## Repository Architecture
 
 ```
 root/
-├─ src/                    # Code source du plugin (TypeScript)
-│  ├─ main.ts             # Point d'entrée du plugin
-│  ├─ sync/               # Logique de synchronisation
-│  ├─ drive/              # Intégration Google Drive API
-│  └─ convert/            # Conversion Markdown → Google Docs
-├─ manifest.json          # Métadonnées du plugin Obsidian
-├─ package.json           # Dépendances et scripts npm
-├─ tsconfig.json          # Configuration TypeScript
-└─ README.md              # Documentation principale
+├─ src/                    # Plugin source code (TypeScript)
+│  ├─ main.ts             # Plugin entry point
+│  ├─ sync/               # Synchronization logic
+│  ├─ drive/              # Google Drive API integration
+│  └─ convert/            # Markdown → Google Docs conversion
+├─ manifest.json          # Obsidian plugin metadata
+├─ package.json           # npm dependencies and scripts
+├─ tsconfig.json          # TypeScript configuration
+└─ README.md              # Main documentation
 ```
 
-## Prérequis & Installation
+## Prerequisites & Installation
 
-### Prérequis
+### Prerequisites
 
-- **Obsidian** installé (version 0.15.0 ou supérieure)
-- **Node.js** et **npm** pour le développement
-- **Compte Google** avec accès à Google Drive
-- **Projet Google Cloud** avec API Google Drive activée (voir section Configuration)
+- **Obsidian** installed (version 0.15.0 or higher)
+- **Node.js** and **npm** for development
+- **Google account** with Google Drive access
+- **Google Cloud project** with Google Drive API enabled (see Configuration section)
 
 ### Installation
 
-1. **Cloner le dépôt** :
+1. **Clone the repository** :
 
 ```bash
 git clone <repository-url>
 cd gemini-sync
 ```
 
-2. **Installer les dépendances** :
+2. **Install dependencies** :
 
 ```bash
 npm install
 ```
 
-*Installe toutes les dépendances listées dans `package.json` (Google APIs, Obsidian API, etc.)*
+*Installs all dependencies listed in `package.json` (Google APIs, Obsidian API, etc.)*
 
-3. **Compiler le plugin** :
+3. **Build the plugin** :
 
 ```bash
 npm run build
 ```
 
-*Compile le TypeScript en JavaScript pour Obsidian*
+*Compiles TypeScript to JavaScript for Obsidian*
 
-4. **Activer le plugin dans Obsidian** :
+4. **Enable the plugin in Obsidian** :
 
-- Ouvrir Obsidian
-- Aller dans Paramètres → Plugins communautaires
-- Activer "Gemini Sync"
+- Open Obsidian
+- Go to Settings → Community plugins
+- Enable "Gemini Sync"
 
 ## Configuration
 
-### Guide de Configuration Détaillé
+### Detailed Configuration Guide
 
-Pour utiliser ce plugin, vous devez configurer un projet Google Cloud et créer des identifiants OAuth. Suivez ce guide étape par étape :
+To use this plugin, you need to configure a Google Cloud project and create OAuth credentials. Follow this step-by-step guide:
 
-#### Étape 1 : Créer un projet Google Cloud
+#### Step 1: Create a Google Cloud Project
 
-1. Allez sur la [Google Cloud Console](https://console.cloud.google.com/).
-2. Cliquez sur le sélecteur de projet en haut à gauche (à côté du logo Google Cloud).
-3. Cliquez sur **"New Project"** (Nouveau projet).
-4. Donnez un nom à votre projet (ex: `Obsidian Gemini Sync`) et cliquez sur **"Create"**.
-5. Attendez que le projet soit créé et sélectionnez-le.
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
+2. Click on the project selector at the top left (next to the Google Cloud logo).
+3. Click **"New Project"**.
+4. Give your project a name (e.g., `Obsidian Gemini Sync`) and click **"Create"**.
+5. Wait for the project to be created and select it.
 
-#### Étape 2 : Activer les APIs nécessaires
+#### Step 2: Enable Required APIs
 
-1. Dans le menu de gauche, allez dans **"APIs & Services"** > **"Library"**.
-2. Recherchez **"Google Drive API"**.
-3. Cliquez dessus puis sur **"Enable"**.
-4. Revenez à la bibliothèque ("Library").
-5. Recherchez **"Google Docs API"**.
-6. Cliquez dessus puis sur **"Enable"**.
+1. In the left menu, go to **"APIs & Services"** > **"Library"**.
+2. Search for **"Google Drive API"**.
+3. Click on it and then click **"Enable"**.
+4. Return to the library ("Library").
+5. Search for **"Google Docs API"**.
+6. Click on it and then click **"Enable"**.
 
-#### Étape 3 : Configurer l'écran de consentement OAuth
+#### Step 3: Configure OAuth Consent Screen
 
-1. Dans le menu de gauche, allez dans **"APIs & Services"** > **"OAuth consent screen"**.
-2. Choisissez **"External"** (Externe) et cliquez sur **"Create"**.
-3. Remplissez les informations obligatoires :
-   - **App name** : `Gemini Sync` (ou autre)
-   - **User support email** : Votre email
-   - **Developer contact information** : Votre email
-4. Cliquez sur **"Save and Continue"**.
-5. **Scopes** : Vous pouvez passer cette étape ou ajouter manuellement :
+1. In the left menu, go to **"APIs & Services"** > **"OAuth consent screen"**.
+2. Choose **"External"** and click **"Create"**.
+3. Fill in the required information:
+   - **App name** : `Gemini Sync` (or other)
+   - **User support email** : Your email
+   - **Developer contact information** : Your email
+4. Click **"Save and Continue"**.
+5. **Scopes** : You can skip this step or add manually:
    - `.../auth/drive.file`
    - `.../auth/documents`
-   mais ce n'est pas strictement obligatoire ici car le plugin demandera les permissions lors de l'authentification.
-6. **Test users** : Ajoutez votre adresse email Google (celle que vous utiliserez pour vous connecter). **C'est important car l'app est en mode "Testing".**
-7. Cliquez sur **"Save and Continue"** jusqu'à la fin.
+   but this is not strictly required here as the plugin will request permissions during authentication.
+6. **Test users** : Add your Google email address (the one you will use to log in). **This is important because the app is in "Testing" mode.**
+7. Click **"Save and Continue"** until the end.
 
-#### Étape 4 : Créer des identifiants (Credentials)
+#### Step 4: Create Credentials
 
-1. Allez dans **"APIs & Services"** > **"Credentials"**.
-2. Cliquez sur **"+ CREATE CREDENTIALS"** > **"OAuth client ID"**.
-3. **Application type** : Sélectionnez **"Desktop app"**.
-4. **Name** : `Obsidian Plugin` (ou autre).
-5. Cliquez sur **"Create"**.
-6. Une fenêtre s'ouvre avec votre **Client ID** et **Client Secret**. Gardez-les sous la main (ou téléchargez le JSON).
+1. Go to **"APIs & Services"** > **"Credentials"**.
+2. Click **"+ CREATE CREDENTIALS"** > **"OAuth client ID"**.
+3. **Application type** : Select **"Desktop app"**.
+4. **Name** : `Obsidian Plugin` (or other).
+5. Click **"Create"**.
+6. A window opens with your **Client ID** and **Client Secret**. Keep them handy (or download the JSON).
 
-#### Étape 5 : Configuration dans Obsidian
+#### Step 5: Configuration in Obsidian
 
-1. Ouvrez les paramètres du plugin **Gemini Sync** dans Obsidian.
-2. Cliquez sur le bouton **"Lancer l'assistant de configuration"** pour un guide interactif, ou remplissez manuellement :
-   - Copiez le **Client ID** et le **Client Secret** dans les champs correspondants.
-   - Cliquez sur **"Generate URL"**.
-   - Connectez-vous avec votre compte Google (celui ajouté dans les "Test users").
-   - Acceptez les permissions (vous aurez probablement un écran "Google hasn't verified this app", cliquez sur "Continue" ou "Advanced" > "Go to ... (unsafe)").
-   - Copiez le code d'autorisation fourni par Google.
-   - Collez-le dans le champ **"Auth Code"** du plugin et validez.
-3. (Optionnel) Configurez le **Dossier distant** si vous souhaitez que vos fichiers soient dans un sous-dossier spécifique de votre Drive.
+1. Open the **Gemini Sync** plugin settings in Obsidian.
+2. Click the **"Start Wizard"** button for an interactive guide, or fill in manually:
+   - Copy the **Client ID** and **Client Secret** into the corresponding fields.
+   - Click **"Generate URL"**.
+   - Log in with your Google account (the one added in "Test users").
+   - Accept the permissions (you will probably see a "Google hasn't verified this app" screen, click "Continue" or "Advanced" > "Go to ... (unsafe)").
+   - Copy the authorization code provided by Google.
+   - Paste it in the **"Auth Code"** field of the plugin and validate.
+3. (Optional) Configure the **Remote Folder** if you want your files to be in a specific subfolder of your Drive.
 
-## Fichiers importants
+## Important Files
 
-- `[src/main.ts](mdc:src/main.ts)` : Point d'entrée du plugin Obsidian
-  - *Rôle* : Initialise le plugin, charge la configuration, gère les commandes
-  - *Points d'attention* : Gestion du cycle de vie du plugin, hooks Obsidian
-  - *Exemple* : `onload()` — *méthode appelée au chargement du plugin*
+- `[src/main.ts](mdc:src/main.ts)` : Obsidian plugin entry point
+  - *Role* : Initializes the plugin, loads configuration, manages commands
+  - *Points of attention* : Plugin lifecycle management, Obsidian hooks
+  - *Example* : `onload()` — *method called when the plugin loads*
 
-- `[src/sync/syncManager.ts](mdc:src/sync/syncManager.ts)` : Gestionnaire de synchronisation
-  - *Rôle* : Orchestre la synchronisation, détecte les fichiers modifiés, gère la file d'attente
-  - *Noeud central* : Coordonne Drive API et conversion
-  - *Exemple* : `syncVault()` — *lance la synchronisation complète du coffre*
+- `[src/sync/syncManager.ts](mdc:src/sync/syncManager.ts)` : Synchronization manager
+  - *Role* : Orchestrates synchronization, detects modified files, manages queue
+  - *Central node* : Coordinates Drive API and conversion
+  - *Example* : `syncVault()` — *launches complete vault synchronization*
 
-- `[src/drive/driveClient.ts](mdc:src/drive/driveClient.ts)` : Client Google Drive API
-  - *Rôle* : Wrapper autour de l'API Google Drive, gestion de l'authentification OAuth
-  - *Points d'attention* : Gestion des tokens, refresh automatique, gestion d'erreurs
-  - *Exemple* : `uploadFile()` — *upload un fichier vers Google Drive*
+- `[src/drive/driveClient.ts](mdc:src/drive/driveClient.ts)` : Google Drive API client
+  - *Role* : Wrapper around Google Drive API, OAuth authentication management
+  - *Points of attention* : Token management, automatic refresh, error handling
+  - *Example* : `uploadFile()` — *uploads a file to Google Drive*
 
-- `[src/convert/markdownToDocs.ts](mdc:src/convert/markdownToDocs.ts)` : Conversion Markdown → Google Docs
-  - *Rôle* : Convertit le contenu Markdown en format Google Docs API (insertText, formatage, etc.)
-  - *Points d'attention* : Préservation de la structure (titres, listes, liens), gestion des images
-  - *Exemple* : `convertToGoogleDocs()` — *convertit un fichier Markdown en requête API Google Docs*
+- `[src/convert/markdownToDocs.ts](mdc:src/convert/markdownToDocs.ts)` : Markdown → Google Docs conversion
+  - *Role* : Converts Markdown content to Google Docs API format (insertText, formatting, etc.)
+  - *Points of attention* : Structure preservation (headings, lists, links), image handling
+  - *Example* : `convertToGoogleDocs()` — *converts a Markdown file to Google Docs API request*
 
-- `[manifest.json](mdc:manifest.json)` : Métadonnées du plugin
-  - *Rôle* : Définit la version, l'ID, les dépendances Obsidian minimales
-  - *Points d'attention* : Mise à jour de la version à chaque release
+- `[manifest.json](mdc:manifest.json)` : Plugin metadata
+  - *Role* : Defines version, ID, minimum Obsidian dependencies
+  - *Points of attention* : Version update on each release
 
-- `data.json` : Configuration et État local
-  - *Rôle* : Stocke les tokens OAuth (sensibles) et l'index de synchronisation.
-  - *Points d'attention* : **NE JAMAIS COMMITER CE FICHIER**. Il est ajouté au `.gitignore`.
+- `data.json` : Local configuration and state
+  - *Role* : Stores OAuth tokens (sensitive) and synchronization index.
+  - *Points of attention* : **NEVER COMMIT THIS FILE**. It is added to `.gitignore`.
 
-- `[package.json](mdc:package.json)` : Dépendances et scripts
-  - *Rôle* : Liste les dépendances npm (googleapis, obsidian, etc.) et les scripts de build
-  - *Points d'attention* : Mises à jour des dépendances, scripts de développement
+- `[package.json](mdc:package.json)` : Dependencies and scripts
+  - *Role* : Lists npm dependencies (googleapis, obsidian, etc.) and build scripts
+  - *Points of attention* : Dependency updates, development scripts
 
-## Commandes principales
+## Main Commands
 
-- **Installer les dépendances** :
+- **Install dependencies** :
 
 ```bash
 npm install
 ```
 
-*Installe toutes les dépendances listées dans `package.json`*
+*Installs all dependencies listed in `package.json`*
 
-- **Compiler en mode développement** :
+- **Build in development mode** :
 
 ```bash
 npm run build
 ```
 
-*Compile le TypeScript avec watch mode pour recompiler automatiquement lors des modifications*
+*Compiles TypeScript with watch mode to automatically recompile on changes*
 
-- **Compiler pour production** :
+- **Build for production** :
 
 ```bash
 npm run build:prod
 ```
 
-*Compile avec optimisations pour la distribution*
+*Compiles with optimizations for distribution*
 
-- **Lancer les tests** :
+- **Run tests** :
 
 ```bash
 npm test
 ```
 
-*Exécute les tests unitaires et d'intégration*
+*Executes unit and integration tests*
 
-- **Linter le code** :
+- **Lint code** :
 
 ```bash
 npm run lint
 ```
 
-*Vérifie la qualité du code avec ESLint*
+*Checks code quality with ESLint*
 
-## Services & Bases de données
+## Services & Databases
 
 ### Google Drive API
 
 - **Service** : Google Drive (via Google Cloud)
 - **Port** : HTTPS (443)
 - **Endpoint** : `https://www.googleapis.com/drive/v3`
-- **Authentification** : OAuth 2.0 avec refresh token
-- **Local** : Pas de service local nécessaire, tout passe par l'API Google
+- **Authentication** : OAuth 2.0 with refresh token
+- **Local** : No local service required, everything goes through Google API
 
 ### Google Docs API
 
 - **Service** : Google Docs (via Google Cloud)
 - **Port** : HTTPS (443)
 - **Endpoint** : `https://docs.googleapis.com/v1`
-- **Utilisation** : Conversion Markdown → Google Docs via API batch requests
+- **Usage** : Markdown → Google Docs conversion via API batch requests
 
-## Variables d'environnement
+## Environment Variables
 
-Le plugin utilise la configuration Obsidian (pas de variables d'environnement système). Les credentials OAuth sont stockés dans les paramètres du plugin (chiffrés localement par Obsidian).
+The plugin uses Obsidian configuration (no system environment variables). OAuth credentials are stored in plugin settings (locally encrypted by Obsidian).
 
-## Guide de déploiement / Exécution
+## Deployment / Execution Guide
 
-### Développement local
+### Local Development
 
-1. Cloner le dépôt et installer les dépendances
-2. Configurer les credentials Google Cloud (voir section Configuration)
-3. Compiler avec `npm run build`
-4. Créer un lien symbolique vers le dossier `.obsidian/plugins/gemini-sync` de votre coffre de test
-5. Recharger Obsidian pour charger le plugin
+1. Clone the repository and install dependencies
+2. Configure Google Cloud credentials (see Configuration section)
+3. Build with `npm run build`
+4. Create a symbolic link to the `.obsidian/plugins/gemini-sync` folder of your test vault
+5. Reload Obsidian to load the plugin
 
 ### Distribution
 
-1. Compiler avec `npm run build:prod`
-2. Créer une release avec les fichiers compilés (`main.js`, `manifest.json`, `styles.css`)
-3. Publier sur le dépôt GitHub ou la communauté Obsidian
+1. Build with `npm run build:prod`
+2. Create a release with compiled files (`main.js`, `manifest.json`, `styles.css`)
+3. Publish to GitHub repository or Obsidian community
 
-## Comment ça fonctionne techniquement
+## How It Works Technically
 
-### Approche proposée
+### Proposed Approach
 
-**1. Authentification OAuth 2.0**
+**1. OAuth 2.0 Authentication**
 
-Le plugin utilise le flux OAuth 2.0 "Authorization Code" avec PKCE pour sécuriser l'authentification. Lors de la première utilisation, l'utilisateur est redirigé vers Google pour autoriser l'accès, puis le plugin stocke le refresh token de manière sécurisée dans les paramètres Obsidian.
+The plugin uses the OAuth 2.0 "Authorization Code" flow with PKCE to secure authentication. On first use, the user is redirected to Google to authorize access, then the plugin stores the refresh token securely in Obsidian settings.
 
-**2. Synchronisation unidirectionnelle**
+**2. Unidirectional Synchronization**
 
-Le plugin maintient un index local des fichiers synchronisés (hash MD5 + timestamp + Drive ID) sauvegardé dans `data.json` pour persister l'état entre les redémarrages. À chaque synchronisation :
+The plugin maintains a local index of synchronized files (MD5 hash + timestamp + Drive ID) saved in `data.json` to persist state between restarts. On each synchronization:
 
-- Parcourt récursivement le coffre Obsidian
-- Compare chaque fichier avec l'index local
-- Si le fichier n'est pas dans l'index local, vérifie son existence sur Drive par nom pour éviter les doublons (récupération d'état)
-- Pour les fichiers nouveaux/modifiés :
-  - Si `.md` : Convertit en Google Docs et upload
-  - Sinon : Upload direct vers Drive
-- Met à jour l'index local
+- Recursively traverses the Obsidian vault
+- Compares each file with the local index
+- If the file is not in the local index, checks its existence on Drive by name to avoid duplicates (state recovery)
+- For new/modified files:
+  - If `.md` : Converts to Google Docs and uploads
+  - Otherwise : Direct upload to Drive
+- Updates the local index
 
-**3. Conversion Markdown → Google Docs**
+**3. Markdown → Google Docs Conversion**
 
-La conversion utilise l'API Google Docs directement (pas de Pandoc) :
+The conversion uses the Google Docs API directly (no Pandoc):
 
-- Parse le Markdown (bibliothèque comme `marked` ou `remark`)
-- Génère des requêtes batch pour l'API Google Docs :
-  - `insertText` pour le contenu
-  - `updateParagraphStyle` pour les titres
-  - `createParagraphBullets` pour les listes
-  - `updateTextStyle` pour le formatage (gras, italique)
-- Crée le document via `documents.create()` puis applique les modifications via `documents.batchUpdate()`
+- Parses Markdown (library like `marked` or `remark`)
+- Generates batch requests for the Google Docs API:
+  - `insertText` for content
+  - `updateParagraphStyle` for headings
+  - `createParagraphBullets` for lists
+  - `updateTextStyle` for formatting (bold, italic)
+- Creates the document via `documents.create()` then applies modifications via `documents.batchUpdate()`
 
-**4. Gestion de la structure**
+**4. Structure Management**
 
-Le plugin maintient une correspondance entre les chemins locaux et les IDs de fichiers Google Drive pour :
-- Préserver la hiérarchie de dossiers
-- Éviter les doublons
-- Permettre les mises à jour incrémentielles
+The plugin maintains a mapping between local paths and Google Drive file IDs to:
+- Preserve folder hierarchy
+- Avoid duplicates
+- Enable incremental updates
 
-### Avantages de cette approche
+### Advantages of This Approach
 
-- **Pas de dépendance externe** : Tout passe par les APIs Google, pas besoin de Pandoc
-- **Conversion native** : Les documents créés sont de vrais Google Docs, pas des imports
-- **Performance** : Synchronisation incrémentielle, seulement les fichiers modifiés
-- **Fiabilité** : Gestion d'erreurs et retry automatique pour les échecs réseau
+- **No external dependency** : Everything goes through Google APIs, no need for Pandoc
+- **Native conversion** : Created documents are real Google Docs, not imports
+- **Performance** : Incremental synchronization, only modified files
+- **Reliability** : Error handling and automatic retry for network failures
 
-### Limitations connues
+### Known Limitations
 
-- **Images** : Les images référencées dans Markdown doivent être uploadées séparément et liées dans le Google Doc
-- **Liens internes** : Les liens `[[wiki]]` Obsidian ne sont pas convertis automatiquement (peuvent être convertis en liens texte)
-- **Plugins Obsidian** : Le contenu généré par d'autres plugins (ex: Dataview) n'est pas interprété
+- **Images** : Images referenced in Markdown must be uploaded separately and linked in the Google Doc
+- **Internal links** : Obsidian `[[wiki]]` links are not automatically converted (can be converted to text links)
+- **Obsidian plugins** : Content generated by other plugins (e.g., Dataview) is not interpreted
 
 ## Changelog
 
-### Version 0.1.0 (à venir)
+### Version 0.1.0 (upcoming)
 
-- Synchronisation unidirectionnelle de base
-- Conversion Markdown → Google Docs
-- Authentification OAuth 2.0
-- Gestion des dossiers
+- Basic unidirectional synchronization
+- Markdown → Google Docs conversion
+- OAuth 2.0 authentication
+- Folder management
 
