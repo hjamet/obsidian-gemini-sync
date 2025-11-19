@@ -13,6 +13,7 @@ Ce plugin effectue une synchronisation **unidirectionnelle** (Obsidian → Googl
 - **Résilience aux redémarrages** : L'état de synchronisation est sauvegardé localement pour éviter les re-uploads inutiles après redémarrage
 - **Force Resync** : Bouton d'urgence pour réinitialiser complètement la synchronisation et nettoyer le dossier distant
 - **Conversion automatique** : Les fichiers `.md` sont convertis en documents Google Docs
+- **Support binaire** : Synchronisation fiable des PDFs et images (PDF, PNG, JPG, GIF)
 - **Détection des modifications** : Seuls les fichiers nouveaux ou modifiés sont synchronisés
 - **Annulation** : Possibilité d'annuler une synchronisation en cours via la barre d'état
 - **Gestion des dossiers** : La structure de dossiers est préservée sur Google Drive
