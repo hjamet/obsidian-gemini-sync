@@ -10,6 +10,8 @@ Ce plugin effectue une synchronisation **unidirectionnelle** (Obsidian → Googl
 
 - **Synchronisation unidirectionnelle** : Tous les fichiers du coffre Obsidian sont synchronisés vers Google Drive
 - **Synchronisation au démarrage** : Option configurable pour lancer la synchronisation à l'ouverture d'Obsidian
+- **Résilience aux redémarrages** : L'état de synchronisation est sauvegardé localement pour éviter les re-uploads inutiles après redémarrage
+- **Force Resync** : Bouton d'urgence pour réinitialiser complètement la synchronisation et nettoyer le dossier distant
 - **Conversion automatique** : Les fichiers `.md` sont convertis en documents Google Docs
 - **Détection des modifications** : Seuls les fichiers nouveaux ou modifiés sont synchronisés
 - **Annulation** : Possibilité d'annuler une synchronisation en cours via la barre d'état
@@ -250,10 +252,11 @@ Le plugin utilise le flux OAuth 2.0 "Authorization Code" avec PKCE pour sécuris
 
 **2. Synchronisation unidirectionnelle**
 
-Le plugin maintient un index local des fichiers synchronisés (hash MD5 + timestamp) pour détecter les modifications. À chaque synchronisation :
+Le plugin maintient un index local des fichiers synchronisés (hash MD5 + timestamp + Drive ID) sauvegardé dans `data.json` pour persister l'état entre les redémarrages. À chaque synchronisation :
 
 - Parcourt récursivement le coffre Obsidian
 - Compare chaque fichier avec l'index local
+- Si le fichier n'est pas dans l'index local, vérifie son existence sur Drive par nom pour éviter les doublons (récupération d'état)
 - Pour les fichiers nouveaux/modifiés :
   - Si `.md` : Convertit en Google Docs et upload
   - Sinon : Upload direct vers Drive

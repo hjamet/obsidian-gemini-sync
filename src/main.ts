@@ -4,6 +4,17 @@ import { SyncManager } from './sync/syncManager';
 import { SetupWizardModal } from './ui/setupWizard';
 import { FolderSuggestModal } from './ui/folderSuggest';
 
+export interface SyncIndexEntry {
+    path: string;
+    driveId: string;
+    hash: string;
+    lastModified: number;
+}
+
+export interface SyncIndex {
+    [path: string]: SyncIndexEntry;
+}
+
 export interface GeminiSyncSettings {
     clientId: string;
     clientSecret: string;
@@ -13,7 +24,8 @@ export interface GeminiSyncSettings {
     syncImages: boolean;
     syncPDFs: boolean;
     syncInterval: number; // in minutes
-    excludedFolders: string[]; // Changed from string to string[]
+    excludedFolders: string[];
+    syncIndex: SyncIndex;
 }
 
 const DEFAULT_SETTINGS: GeminiSyncSettings = {
@@ -25,7 +37,8 @@ const DEFAULT_SETTINGS: GeminiSyncSettings = {
     syncImages: true,
     syncPDFs: true,
     syncInterval: 60,
-    excludedFolders: []
+    excludedFolders: [],
+    syncIndex: {}
 }
 
 export default class GeminiSyncPlugin extends Plugin {
@@ -43,7 +56,7 @@ export default class GeminiSyncPlugin extends Plugin {
         this.statusBarItem = this.addStatusBarItem();
         this.statusBarItem.setText('');
 
-        this.syncManager = new SyncManager(this.app, this.driveClient, this.settings, this.statusBarItem);
+        this.syncManager = new SyncManager(this.app, this.driveClient, this.settings, this.statusBarItem, () => this.saveSettings());
 
         this.addSettingTab(new GeminiSyncSettingTab(this.app, this));
 
@@ -379,6 +392,27 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                         this.display();
                         new Notice('Disconnected.');
+                    }));
+
+            containerEl.createEl('hr');
+
+            const div = containerEl.createDiv();
+            div.style.display = 'flex';
+            div.style.justifyContent = 'center';
+            div.style.marginTop = '20px';
+
+            new Setting(div)
+                .setName('Danger Zone')
+                .setDesc('')
+                .addButton(button => button
+                    .setButtonText('FORCE RESYNC (Delete Remote & Restart)')
+                    .setWarning()
+                    .onClick(async () => {
+                        if (confirm('Are you sure? This will DELETE the remote folder and re-upload everything. This action cannot be undone.')) {
+                            new Notice('Starting Force Resync...');
+                            await this.plugin.syncManager.forceResync();
+                            new Notice('Force Resync completed.');
+                        }
                     }));
         }
     }
