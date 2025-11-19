@@ -8,26 +8,33 @@ interface GeminiSyncSettings {
     clientSecret: string;
     refreshToken: string;
     remoteFolderPath: string;
+    syncImages: boolean;
+    syncPDFs: boolean;
+    syncInterval: number; // in minutes
 }
 
 const DEFAULT_SETTINGS: GeminiSyncSettings = {
     clientId: '',
     clientSecret: '',
     refreshToken: '',
-    remoteFolderPath: ''
+    remoteFolderPath: '',
+    syncImages: true,
+    syncPDFs: true,
+    syncInterval: 60
 }
 
 export default class GeminiSyncPlugin extends Plugin {
     settings: GeminiSyncSettings;
     driveClient: DriveClient;
     syncManager: SyncManager;
+    syncIntervalId: number | undefined;
 
     async onload() {
         await this.loadSettings();
 
         this.initializeDriveClient();
 
-        this.syncManager = new SyncManager(this.app, this.driveClient);
+        this.syncManager = new SyncManager(this.app, this.driveClient, this.settings);
 
         this.addSettingTab(new GeminiSyncSettingTab(this.app, this));
 
@@ -57,6 +64,8 @@ export default class GeminiSyncPlugin extends Plugin {
         this.addRibbonIcon('refresh-cw', 'Gemini Sync', async () => {
             await this.syncManager.syncVault();
         });
+
+        this.configurePeriodicSync();
     }
 
     initializeDriveClient() {
@@ -72,8 +81,25 @@ export default class GeminiSyncPlugin extends Plugin {
         });
     }
 
-    async onunload() {
+    configurePeriodicSync() {
+        if (this.syncIntervalId) {
+            window.clearInterval(this.syncIntervalId);
+            this.syncIntervalId = undefined;
+        }
 
+        if (this.settings.syncInterval > 0) {
+            console.log(`Gemini Sync: Enabling periodic sync every ${this.settings.syncInterval} minutes.`);
+            this.syncIntervalId = window.setInterval(async () => {
+                console.log('Gemini Sync: Triggering periodic sync...');
+                await this.syncManager.syncVault();
+            }, this.settings.syncInterval * 60 * 1000);
+        }
+    }
+
+    async onunload() {
+        if (this.syncIntervalId) {
+            window.clearInterval(this.syncIntervalId);
+        }
     }
 
     async loadSettings() {
@@ -82,6 +108,12 @@ export default class GeminiSyncPlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+        // Re-configure sync manager with new settings if needed (or just pass settings ref)
+        // And update periodic sync
+        this.configurePeriodicSync();
+        if (this.syncManager) {
+            this.syncManager.updateSettings(this.settings);
+        }
     }
 }
 
@@ -121,6 +153,42 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.remoteFolderPath = value;
                     await this.plugin.saveSettings();
+                }));
+
+        containerEl.createEl('h3', { text: 'Synchronization Options' });
+
+        new Setting(containerEl)
+            .setName('Sync Images')
+            .setDesc('Include image files in synchronization.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.syncImages)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncImages = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Sync PDFs')
+            .setDesc('Include PDF files in synchronization.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.syncPDFs)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncPDFs = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Sync Interval')
+            .setDesc('Time in minutes between automatic synchronizations. Set to 0 to disable.')
+            .addText(text => text
+                .setPlaceholder('60')
+                .setValue(String(this.plugin.settings.syncInterval))
+                .onChange(async (value) => {
+                    const num = parseInt(value);
+                    if (!isNaN(num) && num >= 0) {
+                        this.plugin.settings.syncInterval = num;
+                        await this.plugin.saveSettings();
+                    }
                 }));
 
         containerEl.createEl('hr');
