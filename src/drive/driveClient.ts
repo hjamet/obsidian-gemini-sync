@@ -360,6 +360,35 @@ export class DriveClient {
     }
 
     /**
+     * Gets file metadata by name and parent ID.
+     * Useful for checking existence and properties before upload.
+     */
+    async getFileMetadataByName(name: string, parentId: string): Promise<{ id: string, modifiedTime?: string, md5Checksum?: string } | null> {
+        const drive = this.getDrive();
+        const escapedName = name.replace(/'/g, "\\'");
+        let query = `name = '${escapedName}' and trashed = false`;
+        if (parentId) {
+            query += ` and '${parentId}' in parents`;
+        }
+
+        try {
+            const res = await drive.files.list({
+                q: query,
+                fields: 'files(id, modifiedTime, md5Checksum)',
+                spaces: 'drive',
+            });
+
+            if (res.data.files && res.data.files.length > 0) {
+                return res.data.files[0] as { id: string, modifiedTime?: string, md5Checksum?: string };
+            }
+            return null;
+        } catch (error) {
+            console.error(`Failed to get metadata for ${name}:`, error);
+            return null;
+        }
+    }
+
+    /**
      * Downloads the content of a file as text.
      */
     async getFileContent(fileId: string): Promise<string | null> {

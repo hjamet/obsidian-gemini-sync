@@ -154,12 +154,75 @@ export class SyncManager {
             for (const file of filesToSync) {
                 if (this.cancelRequested) break;
                 processedCount++;
-                this.updateStatus(`Gemini Sync: Syncing ${processedCount}/${totalFiles}`, undefined, true);
+                const percentage = Math.round((processedCount / totalFiles) * 100);
+                this.updateStatus(`Gemini Sync: Syncing ${processedCount}/${totalFiles} (${percentage}%)`, undefined, true);
 
                 try {
                     // Calculer le hash local
                     const localHash = await this.calculateFileHash(file);
-                    const remoteEntry = remoteManifest.files[file.path];
+                    let remoteEntry = remoteManifest.files[file.path];
+
+                    // SMART RECOVERY: Si le fichier n'est pas dans le manifeste, vérifier s'il existe sur Drive
+                    if (!remoteEntry) {
+                        try {
+                            const parentId = await this.ensureFolderStructure(file.parent?.path || '');
+                            // Markdown files (Google Docs) use basename (no extension), binaries use full name
+                            const searchName = file.extension === 'md' ? file.basename : file.name;
+                            
+                            const existingFile = await this.driveClient.getFileMetadataByName(searchName, parentId);
+
+                            if (existingFile) {
+                                let isUpToDate = false;
+
+                                if (file.extension === 'md') {
+                                    // Pour Google Docs (Markdown), pas de MD5. On vérifie la date de modif.
+                                    // Si Remote >= Local, on considère à jour (évite ré-upload inutile).
+                                    // Note: Drive modifiedTime est une string ISO.
+                                    const remoteModTime = existingFile.modifiedTime ? new Date(existingFile.modifiedTime).getTime() : 0;
+                                    if (remoteModTime > file.stat.mtime) {
+                                        isUpToDate = true;
+                                    }
+                                } else {
+                                    // Pour les binaires (Images/PDF), on compare le MD5
+                                    if (existingFile.md5Checksum === localHash) {
+                                        isUpToDate = true;
+                                    }
+                                }
+
+                                if (isUpToDate) {
+                                    // RECOVERY SUCCESS: On met à jour le manifeste et on saute l'upload
+                                    remoteManifest.files[file.path] = {
+                                        path: file.path,
+                                        driveId: existingFile.id,
+                                        hash: localHash,
+                                        modifiedTime: Date.now()
+                                    };
+                                    
+                                    // Mise à jour de l'index local pour persistance
+                                    this.settings.syncIndex[file.path] = {
+                                        path: file.path,
+                                        driveId: existingFile.id,
+                                        hash: localHash,
+                                        lastModified: file.stat.mtime
+                                    };
+                                    
+                                    remoteEntry = remoteManifest.files[file.path];
+                                    // console.log(`[Smart Recovery] Recovered ${file.path}`);
+                                } else {
+                                    // EXISTS BUT DIFFERENT: On met à jour le manifeste avec le bon ID pour forcer un UPDATE au lieu d'un CREATE
+                                    remoteManifest.files[file.path] = {
+                                        path: file.path,
+                                        driveId: existingFile.id,
+                                        hash: 'mismatch', // Force update
+                                        modifiedTime: 0
+                                    };
+                                    remoteEntry = remoteManifest.files[file.path];
+                                }
+                            }
+                        } catch (recErr) {
+                            console.error(`Smart recovery failed for ${file.path}:`, recErr);
+                        }
+                    }
 
                     // Décision : Upload si inexistant ou modifié
                     if (!remoteEntry || remoteEntry.hash !== localHash) {
