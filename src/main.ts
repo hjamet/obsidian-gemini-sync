@@ -8,6 +8,7 @@ export interface GeminiSyncSettings {
     clientSecret: string;
     refreshToken: string;
     remoteFolderPath: string;
+    syncOnStartup: boolean;
     syncImages: boolean;
     syncPDFs: boolean;
     syncInterval: number; // in minutes
@@ -19,6 +20,7 @@ const DEFAULT_SETTINGS: GeminiSyncSettings = {
     clientSecret: '',
     refreshToken: '',
     remoteFolderPath: '',
+    syncOnStartup: true,
     syncImages: true,
     syncPDFs: true,
     syncInterval: 60,
@@ -72,6 +74,14 @@ export default class GeminiSyncPlugin extends Plugin {
         });
 
         this.configurePeriodicSync();
+
+        // Trigger sync on startup if enabled
+        if (this.settings.syncOnStartup) {
+            this.app.workspace.onLayoutReady(async () => {
+                // console.log('Gemini Sync: Triggering startup sync...');
+                await this.syncManager.syncVault();
+            });
+        }
     }
 
     initializeDriveClient() {
@@ -162,6 +172,16 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                 }));
 
         containerEl.createEl('h3', { text: 'Synchronization Options' });
+
+        new Setting(containerEl)
+            .setName('Sync on Startup')
+            .setDesc('Automatically sync when Obsidian starts.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.syncOnStartup)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncOnStartup = value;
+                    await this.plugin.saveSettings();
+                }));
 
         new Setting(containerEl)
             .setName('Sync Images')
