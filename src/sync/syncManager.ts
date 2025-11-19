@@ -194,8 +194,10 @@ export class SyncManager {
         } else {
             // Binary file
             const arrayBuffer = await this.app.vault.readBinary(file);
+            console.log(`[SyncManager] Read binary file ${file.path}, size: ${arrayBuffer.byteLength}`);
             // Convert ArrayBuffer to Buffer for Google API
             content = Buffer.from(arrayBuffer);
+            console.log(`[SyncManager] Converted to Buffer, size: ${content.length}`);
             // MD5 for binary
             const wordChanged = CryptoJS.lib.WordArray.create(arrayBuffer as any);
             hash = CryptoJS.MD5(wordChanged).toString();
