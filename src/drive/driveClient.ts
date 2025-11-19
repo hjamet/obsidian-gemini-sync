@@ -175,6 +175,68 @@ export class DriveClient {
     }
 
     /**
+     * Deletes a file or folder from Google Drive (moves to trash for safety).
+     * @param fileId The ID of the file to delete.
+     * @param scopeId Optional. If provided, ensures the file is within this folder (or is the folder itself) before deleting.
+     */
+    async deleteFile(fileId: string, scopeId?: string): Promise<void> {
+        const drive = this.getDrive();
+
+        // 1. Scope Validation (Security Check)
+        if (scopeId && fileId !== scopeId) {
+            const isSafe = await this.isDescendant(fileId, scopeId);
+            if (!isSafe) {
+                console.error(`Security Block: Attempted to delete file ${fileId} which is not inside scope ${scopeId}`);
+                throw new Error('Security Violation: File is outside the allowed vault scope.');
+            }
+        }
+
+        // 2. Soft Delete (Move to Trash)
+        // We use update with trashed=true instead of delete to allow recovery
+        await drive.files.update({
+            fileId: fileId,
+            requestBody: {
+                trashed: true
+            }
+        });
+    }
+
+    /**
+     * Checks if a file is a descendant of a specific folder.
+     */
+    private async isDescendant(childId: string, ancestorId: string): Promise<boolean> {
+        const drive = this.getDrive();
+        let currentId = childId;
+        let depth = 0;
+        const MAX_DEPTH = 50; // Prevent infinite loops
+
+        while (depth < MAX_DEPTH) {
+            try {
+                const res = await drive.files.get({
+                    fileId: currentId,
+                    fields: 'parents'
+                });
+
+                if (!res.data.parents || res.data.parents.length === 0) {
+                    return false; // Reached root/orphan without finding ancestor
+                }
+
+                if (res.data.parents.includes(ancestorId)) {
+                    return true; // Found it!
+                }
+
+                // Move up to the first parent
+                currentId = res.data.parents[0];
+                depth++;
+            } catch (e) {
+                console.error('Error traversing parents:', e);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Searches for a file by name and parent.
      */
     async getFileId(name: string, parentId?: string, mimeType?: string): Promise<string | null> {

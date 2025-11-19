@@ -2,33 +2,23 @@ import { App, TFile, Notice } from 'obsidian';
 import { DriveClient } from '../drive/driveClient';
 import { convertToGoogleDocs } from '../convert/markdownToDocs';
 import * as CryptoJS from 'crypto-js';
-import { GeminiSyncSettings } from '../main';
-
-interface SyncIndexEntry {
-    path: string;
-    driveId: string;
-    hash: string;
-    lastModified: number;
-}
-
-interface SyncIndex {
-    [path: string]: SyncIndexEntry;
-}
+import { GeminiSyncSettings, SyncIndex } from '../main';
 
 export class SyncManager {
     app: App;
     driveClient: DriveClient;
     settings: GeminiSyncSettings;
-    syncIndex: SyncIndex = {};
     statusBarItem: HTMLElement | null = null;
     isSyncing: boolean = false;
     cancelRequested: boolean = false;
+    onSaveSettings: () => Promise<void>;
 
-    constructor(app: App, driveClient: DriveClient, settings: GeminiSyncSettings, statusBarItem?: HTMLElement) {
+    constructor(app: App, driveClient: DriveClient, settings: GeminiSyncSettings, statusBarItem: HTMLElement | undefined, onSaveSettings: () => Promise<void>) {
         this.app = app;
         this.driveClient = driveClient;
         this.settings = settings;
         this.statusBarItem = statusBarItem || null;
+        this.onSaveSettings = onSaveSettings;
     }
 
     public updateSettings(settings: GeminiSyncSettings) {
@@ -43,20 +33,55 @@ export class SyncManager {
         }
     }
 
+    public async forceResync() {
+        if (this.isSyncing) {
+            new Notice('Sync in progress, please wait.');
+            return;
+        }
+
+        this.isSyncing = true;
+        try {
+            this.updateStatus('Gemini Sync: Deleting remote folder...', undefined, false);
+            // 1. Find root folder
+            const rootName = this.settings.remoteFolderPath || this.app.vault.getName();
+            const rootId = await this.driveClient.getFileId(rootName, undefined, 'application/vnd.google-apps.folder');
+
+            if (rootId) {
+                // 2. Delete it (soft delete with scope check)
+                // We pass rootId as scopeId, which allows deleting the root itself
+                await this.driveClient.deleteFile(rootId, rootId);
+                new Notice('Remote folder deleted.');
+            }
+
+            // 3. Clear local index
+            this.settings.syncIndex = {};
+            await this.onSaveSettings();
+
+            // 4. Restart sync
+            this.isSyncing = false; // syncVault checks this
+            await this.syncVault();
+
+        } catch (e) {
+            console.error('Force Resync failed:', e);
+            new Notice('Force Resync failed.');
+            this.isSyncing = false;
+        }
+    }
+
     private updateStatus(message: string, timeout?: number, showCancel: boolean = false) {
         if (this.statusBarItem) {
             this.statusBarItem.empty();
-            
+
             const msgSpan = this.statusBarItem.createEl('span', { text: message });
-            
+
             if (showCancel) {
                 const btn = this.statusBarItem.createEl('span', { cls: 'status-bar-item-segment' });
                 btn.style.marginLeft = '10px';
                 btn.style.cursor = 'pointer';
                 btn.style.color = 'var(--text-error)'; // Make it look like a cancel action
-                btn.setText("Cancel"); 
+                btn.setText("Cancel");
                 btn.setAttribute('aria-label', 'Cancel Sync');
-                
+
                 btn.onclick = (e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -94,17 +119,17 @@ export class SyncManager {
             this.updateStatus('Gemini Sync: Starting...', undefined, true);
 
             const files = this.app.vault.getFiles();
-            
+
             // Parse excluded folders
-            const excludedFolders = Array.isArray(this.settings.excludedFolders) 
-                ? this.settings.excludedFolders 
+            const excludedFolders = Array.isArray(this.settings.excludedFolders)
+                ? this.settings.excludedFolders
                 : [];
-            
+
             console.log('Gemini Sync: Starting sync with excluded folders:', excludedFolders);
 
             const filesToSync = files.filter(file => {
                 // Check if file is in an excluded folder (strict match or subfolder)
-                if (excludedFolders.some(excluded => 
+                if (excludedFolders.some(excluded =>
                     file.path === excluded || file.path.startsWith(excluded + '/')
                 )) {
                     return false;
@@ -114,7 +139,7 @@ export class SyncManager {
                 if (file.extension === 'md') return true;
                 if (file.extension === 'pdf') return this.settings.syncPDFs;
                 if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) return this.settings.syncImages;
-                
+
                 return false; // Skip other types
             });
 
@@ -147,11 +172,13 @@ export class SyncManager {
             this.updateStatus('Gemini Sync: Ready', 5000);
         } finally {
             this.isSyncing = false;
+            // Save settings (including sync index) at the end of sync
+            await this.onSaveSettings();
         }
     }
 
     private async syncFile(file: TFile): Promise<boolean> {
-        const entry = this.syncIndex[file.path];
+        const entry = this.settings.syncIndex[file.path];
 
         // Optimization: Check mtime first
         if (entry && entry.lastModified === file.stat.mtime) {
@@ -177,10 +204,11 @@ export class SyncManager {
         // Double check hash if entry exists
         if (entry && entry.hash === hash) {
             // Update mtime in index to avoid re-reading next time
-            this.syncIndex[file.path] = {
+            this.settings.syncIndex[file.path] = {
                 ...entry,
                 lastModified: file.stat.mtime
             };
+            // We rely on the final save at the end of syncVault
             return false;
         }
 
@@ -194,33 +222,41 @@ export class SyncManager {
             // Update existing
             await this.driveClient.updateFile(entry.driveId, content, mimeType);
 
-            this.syncIndex[file.path] = {
+            this.settings.syncIndex[file.path] = {
                 ...entry,
                 hash: hash,
                 lastModified: file.stat.mtime
             };
         } else {
-            // Create new
-            let driveId: string;
-            if (file.extension === 'md') {
-                driveId = await this.driveClient.uploadFile(file.basename, '', mimeType, parentId);
-                const requests = convertToGoogleDocs(content);
-                if (requests.length > 0) {
-                    const docs = this.driveClient.getDocs();
-                    await docs.documents.batchUpdate({
-                        documentId: driveId,
-                        requestBody: {
-                            requests: requests
-                        }
-                    });
-                }
+            // File not in local index. Check if it exists on Drive to avoid duplicates.
+            let driveId = await this.driveClient.getFileId(file.name, parentId, mimeType);
+
+            if (driveId) {
+                // Found on Drive! Update it instead of creating new.
+                console.log(`Found existing file on Drive: ${file.path} -> ${driveId}`);
+                await this.driveClient.updateFile(driveId, content, mimeType);
             } else {
-                driveId = await this.driveClient.uploadFile(file.name, content, mimeType, parentId);
+                // Not found, create new.
+                if (file.extension === 'md') {
+                    driveId = await this.driveClient.uploadFile(file.basename, '', mimeType, parentId);
+                    const requests = convertToGoogleDocs(content);
+                    if (requests.length > 0) {
+                        const docs = this.driveClient.getDocs();
+                        await docs.documents.batchUpdate({
+                            documentId: driveId,
+                            requestBody: {
+                                requests: requests
+                            }
+                        });
+                    }
+                } else {
+                    driveId = await this.driveClient.uploadFile(file.name, content, mimeType, parentId);
+                }
             }
 
-            this.syncIndex[file.path] = {
+            this.settings.syncIndex[file.path] = {
                 path: file.path,
-                driveId: driveId,
+                driveId: driveId!, // driveId is definitely assigned here
                 hash: hash,
                 lastModified: file.stat.mtime
             };
