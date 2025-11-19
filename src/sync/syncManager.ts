@@ -2,6 +2,7 @@ import { App, TFile, Notice } from 'obsidian';
 import { DriveClient } from '../drive/driveClient';
 import { convertToGoogleDocs } from '../convert/markdownToDocs';
 import * as CryptoJS from 'crypto-js';
+import { GeminiSyncSettings } from '../main';
 
 interface SyncIndexEntry {
     path: string;
@@ -14,108 +15,87 @@ interface SyncIndex {
     [path: string]: SyncIndexEntry;
 }
 
-interface SyncSettings {
-    syncImages: boolean;
-    syncPDFs: boolean;
-}
-
 export class SyncManager {
-    private app: App;
-    private driveClient: DriveClient;
-    private syncIndex: SyncIndex = {};
-    private readonly INDEX_FILE = 'gemini-sync-index.json';
-    private settings: SyncSettings;
+    app: App;
+    driveClient: DriveClient;
+    settings: GeminiSyncSettings;
+    syncIndex: SyncIndex = {};
+    statusBarItem: HTMLElement | null = null;
 
-    constructor(app: App, driveClient: DriveClient, settings: SyncSettings) {
+    constructor(app: App, driveClient: DriveClient, settings: GeminiSyncSettings, statusBarItem?: HTMLElement) {
         this.app = app;
         this.driveClient = driveClient;
         this.settings = settings;
+        this.statusBarItem = statusBarItem || null;
     }
 
-    updateSettings(settings: SyncSettings) {
+    public updateSettings(settings: GeminiSyncSettings) {
         this.settings = settings;
     }
 
-    async loadIndex() {
-        if (await this.app.vault.adapter.exists(this.INDEX_FILE)) {
-            const content = await this.app.vault.adapter.read(this.INDEX_FILE);
-            this.syncIndex = JSON.parse(content);
+    private updateStatus(message: string, timeout?: number) {
+        if (this.statusBarItem) {
+            this.statusBarItem.setText(message);
+            if (timeout) {
+                setTimeout(() => {
+                    // Only clear if the message hasn't changed
+                    if (this.statusBarItem?.getText() === message) {
+                        this.statusBarItem.setText('');
+                    }
+                }, timeout);
+            }
         }
     }
 
-    async saveIndex() {
-        await this.app.vault.adapter.write(this.INDEX_FILE, JSON.stringify(this.syncIndex, null, 2));
-    }
-
-    async syncVault() {
+    public async syncVault() {
         if (!this.driveClient.isReady()) {
             new Notice('Gemini Sync: Not authenticated. Please check settings.');
             return;
         }
 
-        new Notice('Gemini Sync: Starting sync...');
-        await this.loadIndex();
+        new Notice('Gemini Sync: Starting synchronization...');
+        this.updateStatus('Gemini Sync: Starting...');
 
-        const allFiles = this.app.vault.getFiles();
-        const filesToSync = allFiles.filter(file => {
-            // Filter hidden files/folders
-            if (file.path.startsWith('.') || file.path.includes('/.')) {
+        const files = this.app.vault.getFiles();
+        
+        // Parse excluded folders
+        const excludedFolders = this.settings.excludedFolders
+            ? this.settings.excludedFolders.split('\n').map(p => p.trim()).filter(p => p.length > 0)
+            : [];
+
+        const filesToSync = files.filter(file => {
+            // Check if file is in an excluded folder
+            if (excludedFolders.some(excluded => file.path.startsWith(excluded))) {
                 return false;
             }
 
-            // Filter by type based on settings
-            const ext = file.extension.toLowerCase();
-            if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext) && !this.settings.syncImages) {
-                return false;
-            }
-            if (ext === 'pdf' && !this.settings.syncPDFs) {
-                return false;
-            }
-
-            const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext);
-            const isPdf = ext === 'pdf';
-            const isMd = ext === 'md';
-
-            if (!isMd && !isImage && !isPdf) {
-                return false;
-            }
-            return true;
+            // Check file types based on settings
+            if (file.extension === 'md') return true;
+            if (file.extension === 'pdf') return this.settings.syncPDFs;
+            if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) return this.settings.syncImages;
+            
+            return false; // Skip other types
         });
 
         const totalFiles = filesToSync.length;
-        console.log(`Gemini Sync: Found ${totalFiles} files to process.`);
-
-        let syncedCount = 0;
-        let errorCount = 0;
-        let processedCount = 0;
-        let lastLoggedPercent = 0;
+        let processedFiles = 0;
+        this.updateStatus(`Gemini Sync: 0/${totalFiles} (0%)`);
 
         for (const file of filesToSync) {
-            processedCount++;
-
-            // Progress logging every 10%
-            const percent = Math.floor((processedCount / totalFiles) * 100);
-            if (percent >= lastLoggedPercent + 10) {
-                console.log(`Gemini Sync: Progress ${percent}% (${processedCount}/${totalFiles})`);
-                lastLoggedPercent = percent;
-            }
-
             try {
-                const synced = await this.syncFile(file);
-                if (synced) syncedCount++;
-            } catch (e) {
-                console.error(`Failed to sync ${file.path}`, e);
-                errorCount++;
+                await this.syncFile(file);
+            } catch (error) {
+                console.error(`Failed to sync file ${file.path}:`, error);
+                new Notice(`Failed to sync ${file.path}`);
+            } finally {
+                processedFiles++;
+                const percent = Math.round((processedFiles / totalFiles) * 100);
+                this.updateStatus(`Gemini Sync: ${processedFiles}/${totalFiles} (${percent}%)`);
             }
         }
 
-        await this.saveIndex();
-
-        if (syncedCount > 0 || errorCount > 0) {
-            new Notice(`Gemini Sync: Completed. Synced ${syncedCount} files. Errors: ${errorCount}.`);
-        } else {
-            new Notice('Gemini Sync: Completed. No changes to sync.');
-        }
+        new Notice('Gemini Sync: Synchronization complete!');
+        this.updateStatus('Gemini Sync: Ready', 5000);
     }
 
     private async syncFile(file: TFile): Promise<boolean> {
@@ -135,15 +115,14 @@ export class SyncManager {
         } else {
             // Binary file
             const arrayBuffer = await this.app.vault.readBinary(file);
-            // Convert ArrayBuffer to Buffer for Google API if needed, or pass as is if supported.
-            // Node environment usually prefers Buffer.
+            // Convert ArrayBuffer to Buffer for Google API
             content = Buffer.from(arrayBuffer);
             // MD5 for binary
-            const wordChanged = CryptoJS.lib.WordArray.create(arrayBuffer as any); // crypto-js supports arraybuffer
+            const wordChanged = CryptoJS.lib.WordArray.create(arrayBuffer as any);
             hash = CryptoJS.MD5(wordChanged).toString();
         }
 
-        // Double check hash if entry exists (in case mtime changed but content didn't)
+        // Double check hash if entry exists
         if (entry && entry.hash === hash) {
             // Update mtime in index to avoid re-reading next time
             this.syncIndex[file.path] = {
@@ -161,11 +140,7 @@ export class SyncManager {
 
         if (entry) {
             // Update existing
-            if (file.extension === 'md') {
-                await this.driveClient.updateFile(entry.driveId, content, mimeType);
-            } else {
-                await this.driveClient.updateFile(entry.driveId, content, mimeType);
-            }
+            await this.driveClient.updateFile(entry.driveId, content, mimeType);
 
             this.syncIndex[file.path] = {
                 ...entry,
@@ -201,14 +176,26 @@ export class SyncManager {
         return true;
     }
 
-    private async ensureFolderStructure(path: string): Promise<string | undefined> {
-        if (!path || path === '/') return undefined; // Root
+    private async getVaultRoot(): Promise<string> {
+        const rootName = this.settings.remoteFolderPath || this.app.vault.getName();
+        // Check if root folder exists
+        let rootId = await this.driveClient.getFileId(rootName, undefined, 'application/vnd.google-apps.folder');
+        if (!rootId) {
+            rootId = await this.driveClient.createFolder(rootName);
+        }
+        return rootId;
+    }
+
+    private async ensureFolderStructure(path: string): Promise<string> {
+        let parentId = await this.getVaultRoot();
+
+        if (!path || path === '/') return parentId;
 
         const parts = path.split('/');
-        let parentId: string | undefined = undefined;
 
         for (const part of parts) {
-            let folderId = await this.driveClient.getFileId(part, parentId);
+            // Check if we have a folder ID for this part under parentId
+            let folderId = await this.driveClient.getFileId(part, parentId, 'application/vnd.google-apps.folder');
             if (!folderId) {
                 folderId = await this.driveClient.createFolder(part, parentId);
             }
