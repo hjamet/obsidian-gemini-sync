@@ -1,6 +1,5 @@
 import { App, TFile, Notice } from 'obsidian';
 import { DriveClient } from '../drive/driveClient';
-import { convertToGoogleDocs } from '../convert/markdownToDocs';
 import * as CryptoJS from 'crypto-js';
 import { GeminiSyncSettings, SyncIndex } from '../main';
 
@@ -248,21 +247,8 @@ export class SyncManager {
                 await this.driveClient.updateFile(driveId, content, mimeType);
             } else {
                 // Not found, create new.
-                if (file.extension === 'md') {
-                    driveId = await this.driveClient.uploadFile(file.basename, '', mimeType, parentId);
-                    const requests = convertToGoogleDocs(content);
-                    if (requests.length > 0) {
-                        const docs = this.driveClient.getDocs();
-                        await docs.documents.batchUpdate({
-                            documentId: driveId,
-                            requestBody: {
-                                requests: requests
-                            }
-                        });
-                    }
-                } else {
-                    driveId = await this.driveClient.uploadFile(file.name, content, mimeType, parentId);
-                }
+                const name = file.extension === 'md' ? file.basename : file.name;
+                driveId = await this.driveClient.uploadFile(name, content, mimeType, parentId);
             }
 
             this.settings.syncIndex[file.path] = {

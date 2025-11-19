@@ -2,8 +2,11 @@ export function convertToGoogleDocs(markdown: string): any[] {
     const requests: any[] = [];
     let index = 1; // Google Docs starts at index 1
 
+    // Normalize newlines to avoid index drift on Windows (CRLF -> LF)
+    const normalizedMarkdown = markdown.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
     // Split by lines
-    const lines = markdown.split('\n');
+    const lines = normalizedMarkdown.split('\n');
 
     // We will process line by line.
     // Note: This is a simplified converter. It handles headers, lists, and plain text.
