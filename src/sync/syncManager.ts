@@ -160,8 +160,8 @@ export class SyncManager {
 
                     // Décision : Upload si inexistant ou modifié
                     if (!remoteEntry || remoteEntry.hash !== localHash) {
-                        if (!remoteEntry) console.log(`[Sync] New file: ${file.path}`);
-                        else console.log(`[Sync] Modified file: ${file.path}`);
+                        // if (!remoteEntry) console.log(`[Sync] New file: ${file.path}`);
+                        // else console.log(`[Sync] Modified file: ${file.path}`);
 
                         await this.uploadFile(file, rootId, remoteManifest);
                     } else {
@@ -195,7 +195,7 @@ export class SyncManager {
                         const isExcluded = excludedFolders.some(ex => remotePath === ex || remotePath.startsWith(ex + '/'));
 
                         if (!isExcluded) {
-                            console.log(`[Sync] Deleting remote orphan: ${remotePath}`);
+                            // console.log(`[Sync] Deleting remote orphan: ${remotePath}`);
                             try {
                                 const entry = remoteManifest.files[remotePath];
                                 // Pass rootId as scopeId to enable security check (prevents deletion outside vault folder)
@@ -300,13 +300,30 @@ export class SyncManager {
     private async getVaultRoot(): Promise<string> {
         if (this.rootFolderId) return this.rootFolderId;
 
-        const rootName = this.settings.remoteFolderPath || this.app.vault.getName();
-        let rootId = await this.driveClient.getFileId(rootName, 'root', 'application/vnd.google-apps.folder');
-        if (!rootId) {
-            rootId = await this.driveClient.createFolder(rootName);
-        }
+        const rootPath = this.settings.remoteFolderPath || this.app.vault.getName();
+
+        // Use ensureFolderStructure logic to resolve the full path
+        // We treat the rootPath as a folder structure we need to find/create starting from Drive root
+        const rootId = await this.resolveRemoteRoot(rootPath);
+
         this.rootFolderId = rootId;
         return rootId;
+    }
+
+    private async resolveRemoteRoot(path: string): Promise<string> {
+        if (!path || path === '/') return 'root';
+
+        const parts = path.split('/').filter(p => p.length > 0);
+        let parentId = 'root';
+
+        for (const part of parts) {
+            let folderId = await this.driveClient.getFileId(part, parentId, 'application/vnd.google-apps.folder');
+            if (!folderId) {
+                folderId = await this.driveClient.createFolder(part, parentId);
+            }
+            parentId = folderId;
+        }
+        return parentId;
     }
 
     private async ensureFolderStructure(path: string): Promise<string> {

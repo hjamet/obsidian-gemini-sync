@@ -120,7 +120,7 @@ export default class GeminiSyncPlugin extends Plugin {
         if (this.settings.syncInterval > 0) {
             // console.log(`Gemini Sync: Enabling periodic sync every ${this.settings.syncInterval} minutes.`);
             this.syncIntervalId = window.setInterval(async () => {
-                console.log('Gemini Sync: Triggering periodic sync...');
+                // console.log('Gemini Sync: Triggering periodic sync...');
                 await this.syncManager.syncVault();
             }, this.settings.syncInterval * 60 * 1000);
         }
