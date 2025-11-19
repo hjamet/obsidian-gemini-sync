@@ -1,7 +1,8 @@
-import { App, Plugin, PluginSettingTab, Setting, Notice } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Notice, setIcon } from 'obsidian';
 import { DriveClient } from './drive/driveClient';
 import { SyncManager } from './sync/syncManager';
 import { SetupWizardModal } from './ui/setupWizard';
+import { FolderSuggestModal } from './ui/folderSuggest';
 
 export interface GeminiSyncSettings {
     clientId: string;
@@ -12,7 +13,7 @@ export interface GeminiSyncSettings {
     syncImages: boolean;
     syncPDFs: boolean;
     syncInterval: number; // in minutes
-    excludedFolders: string; // New setting: comma or newline separated list
+    excludedFolders: string[]; // Changed from string to string[]
 }
 
 const DEFAULT_SETTINGS: GeminiSyncSettings = {
@@ -24,7 +25,7 @@ const DEFAULT_SETTINGS: GeminiSyncSettings = {
     syncImages: true,
     syncPDFs: true,
     syncInterval: 60,
-    excludedFolders: ''
+    excludedFolders: []
 }
 
 export default class GeminiSyncPlugin extends Plugin {
@@ -119,7 +120,22 @@ export default class GeminiSyncPlugin extends Plugin {
     }
 
     async loadSettings() {
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        const loadedData = await this.loadData();
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
+
+        // Migration: Convert string excludedFolders to array if needed
+        if (typeof this.settings.excludedFolders === 'string') {
+            const oldString = this.settings.excludedFolders as string;
+            if (oldString.trim() === '') {
+                this.settings.excludedFolders = [];
+            } else {
+                this.settings.excludedFolders = oldString
+                    .split(/[\n,]+/)
+                    .map(s => s.trim())
+                    .filter(s => s.length > 0);
+            }
+            await this.saveSettings();
+        }
     }
 
     async saveSettings() {
@@ -217,16 +233,65 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     }
                 }));
 
-        new Setting(containerEl)
-            .setName('Excluded Folders')
-            .setDesc('List of folders to exclude from synchronization (one per line).')
-            .addTextArea(text => text
-                .setPlaceholder('Folder1\nFolder2/Subfolder')
-                .setValue(this.plugin.settings.excludedFolders)
-                .onChange(async (value) => {
-                    this.plugin.settings.excludedFolders = value;
-                    await this.plugin.saveSettings();
+        // --- Excluded Folders Section ---
+        containerEl.createEl('h3', { text: 'Excluded Folders' });
+
+        const excludedFoldersSetting = new Setting(containerEl)
+            .setName('Manage Excluded Folders')
+            .setDesc('Folders added here will be ignored during synchronization.')
+            .addButton(button => button
+                .setButtonText('Add Folder')
+                .setCta()
+                .onClick(() => {
+                    new FolderSuggestModal(this.app, async (folder) => {
+                        if (!this.plugin.settings.excludedFolders.includes(folder.path)) {
+                            this.plugin.settings.excludedFolders.push(folder.path);
+                            await this.plugin.saveSettings();
+                            this.display(); // Refresh settings to show new folder
+                        } else {
+                            new Notice('Folder already excluded');
+                        }
+                    }).open();
                 }));
+
+        // List of excluded folders
+        if (this.plugin.settings.excludedFolders.length > 0) {
+            const listContainer = containerEl.createDiv('gemini-sync-excluded-list');
+            listContainer.style.marginTop = '10px';
+
+            this.plugin.settings.excludedFolders.forEach((path, index) => {
+                const itemContainer = listContainer.createDiv('gemini-sync-excluded-item');
+                itemContainer.style.display = 'flex';
+                itemContainer.style.alignItems = 'center';
+                itemContainer.style.justifyContent = 'space-between';
+                itemContainer.style.marginBottom = '5px';
+                itemContainer.style.padding = '5px 10px';
+                itemContainer.style.backgroundColor = 'var(--background-secondary)';
+                itemContainer.style.borderRadius = '5px';
+
+                itemContainer.createSpan({ text: path });
+
+                const removeBtn = itemContainer.createEl('button', { cls: 'clickable-icon' });
+                removeBtn.style.background = 'transparent';
+                removeBtn.style.boxShadow = 'none';
+                removeBtn.style.padding = '0';
+                removeBtn.style.height = 'fit-content';
+
+                setIcon(removeBtn, 'cross');
+                removeBtn.onclick = async () => {
+                    this.plugin.settings.excludedFolders.splice(index, 1);
+                    await this.plugin.saveSettings();
+                    this.display();
+                };
+            });
+        } else {
+            containerEl.createDiv({
+                text: 'No folders excluded.',
+                cls: 'setting-item-description',
+                attr: { style: 'margin-bottom: 18px; font-style: italic;' }
+            });
+        }
+
 
         containerEl.createEl('hr');
         containerEl.createEl('h3', { text: 'Manual Configuration' });
