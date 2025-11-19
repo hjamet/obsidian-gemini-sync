@@ -388,4 +388,44 @@ export class DriveClient {
         }
         return null;
     }
+
+    /**
+     * Downloads the content of a file as text.
+     */
+    async getFileContent(fileId: string): Promise<string | null> {
+        const drive = this.getDrive();
+        try {
+            const res = await drive.files.get({
+                fileId: fileId,
+                alt: 'media',
+            });
+            
+            if (typeof res.data === 'string') return res.data;
+            if (typeof res.data === 'object') return JSON.stringify(res.data);
+            return String(res.data);
+        } catch (error) {
+            console.error(`Failed to download content for ${fileId}:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Downloads the content of a file as an ArrayBuffer (for binary files).
+     */
+    async getFileBuffer(fileId: string): Promise<ArrayBuffer | null> {
+        const drive = this.getDrive();
+        try {
+            const res = await drive.files.get({
+                fileId: fileId,
+                alt: 'media',
+            }, {
+                responseType: 'arraybuffer'
+            });
+            
+            return res.data as any as ArrayBuffer;
+        } catch (error) {
+            console.error(`Failed to download binary for ${fileId}:`, error);
+            return null;
+        }
+    }
 }

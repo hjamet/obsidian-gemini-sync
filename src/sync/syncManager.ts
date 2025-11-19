@@ -1,7 +1,8 @@
-import { App, TFile, Notice } from 'obsidian';
+import { App, TFile, Notice, TFolder } from 'obsidian';
 import { DriveClient } from '../drive/driveClient';
 import * as CryptoJS from 'crypto-js';
-import { GeminiSyncSettings, SyncIndex } from '../main';
+import { GeminiSyncSettings } from '../main';
+import { ManifestManager, RemoteEntry, RemoteManifest } from './remoteManifest';
 
 export class SyncManager {
     app: App;
@@ -10,6 +11,7 @@ export class SyncManager {
     statusBarItem: HTMLElement | null = null;
     isSyncing: boolean = false;
     cancelRequested: boolean = false;
+    manifestManager: ManifestManager;
     private rootFolderId: string | null = null;
     private folderIdCache: Map<string, string> = new Map();
     onSaveSettings: () => Promise<void>;
@@ -20,6 +22,7 @@ export class SyncManager {
         this.settings = settings;
         this.statusBarItem = statusBarItem || null;
         this.onSaveSettings = onSaveSettings;
+        this.manifestManager = new ManifestManager(driveClient);
     }
 
     public updateSettings(settings: GeminiSyncSettings) {
@@ -47,27 +50,20 @@ export class SyncManager {
         this.isSyncing = true;
         try {
             this.updateStatus('Gemini Sync: Deleting remote folder...', undefined, false);
-            // 1. Find root folder (ensure we look at root to avoid ambiguity)
             const rootName = this.settings.remoteFolderPath || this.app.vault.getName();
             const rootId = await this.driveClient.getFileId(rootName, 'root', 'application/vnd.google-apps.folder');
 
             if (rootId) {
-                // 2. Delete it (soft delete with scope check)
-                // We pass rootId as scopeId, which allows deleting the root itself
                 await this.driveClient.deleteFile(rootId, rootId);
                 new Notice('Remote folder deleted.');
             }
 
-            // Clear cache
             this.rootFolderId = null;
             this.folderIdCache.clear();
-
-            // 3. Clear local index
             this.settings.syncIndex = {};
             await this.onSaveSettings();
 
-            // 4. Restart sync
-            this.isSyncing = false; // syncVault checks this
+            this.isSyncing = false;
             await this.syncVault();
 
         } catch (e) {
@@ -80,17 +76,14 @@ export class SyncManager {
     private updateStatus(message: string, timeout?: number, showCancel: boolean = false) {
         if (this.statusBarItem) {
             this.statusBarItem.empty();
-
             const msgSpan = this.statusBarItem.createEl('span', { text: message });
 
             if (showCancel) {
                 const btn = this.statusBarItem.createEl('span', { cls: 'status-bar-item-segment' });
                 btn.style.marginLeft = '10px';
                 btn.style.cursor = 'pointer';
-                btn.style.color = 'var(--text-error)'; // Make it look like a cancel action
+                btn.style.color = 'var(--text-error)';
                 btn.setText("Cancel");
-                btn.setAttribute('aria-label', 'Cancel Sync');
-
                 btn.onclick = (e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -100,7 +93,6 @@ export class SyncManager {
 
             if (timeout) {
                 setTimeout(() => {
-                    // Only clear if the message hasn't changed
                     if (this.statusBarItem?.getText() === message) {
                         this.statusBarItem.setText('');
                     }
@@ -116,157 +108,198 @@ export class SyncManager {
         }
 
         if (!this.driveClient.isReady()) {
-            new Notice('Gemini Sync: Not authenticated. Please check settings.');
+            new Notice('Gemini Sync: Not authenticated.');
             return;
         }
 
         this.isSyncing = true;
         this.cancelRequested = false;
-        this.folderIdCache.clear(); // Clear folder cache at start of sync
+        this.folderIdCache.clear();
 
         try {
-            new Notice('Gemini Sync: Starting synchronization...');
-            this.updateStatus('Gemini Sync: Starting...', undefined, true);
+            new Notice('Gemini Sync: Starting strict mirror sync...');
+            this.updateStatus('Gemini Sync: Initializing...', undefined, true);
 
-            const files = this.app.vault.getFiles();
+            const rootId = await this.getVaultRoot();
+            
+            // 1. Charger le Manifeste Distant (État actuel du Drive)
+            let remoteManifest = await this.manifestManager.loadManifest(rootId);
+            if (!remoteManifest) {
+                remoteManifest = this.manifestManager.createEmptyManifest();
+            }
 
-            // Parse excluded folders
-            const excludedFolders = Array.isArray(this.settings.excludedFolders)
-                ? this.settings.excludedFolders
-                : [];
-
-            console.log('Gemini Sync: Starting sync with excluded folders:', excludedFolders);
-
-            const filesToSync = files.filter(file => {
-                // Check if file is in an excluded folder (strict match or subfolder)
-                if (excludedFolders.some(excluded =>
-                    file.path === excluded || file.path.startsWith(excluded + '/')
-                )) {
-                    return false;
-                }
-
-                // Check file types based on settings
+            // 2. Préparer la liste des fichiers locaux (Source de Vérité)
+            const localFiles = this.app.vault.getFiles();
+            const excludedFolders = this.settings.excludedFolders || [];
+            
+            // Filtrer les fichiers exclus
+            const filesToSync = localFiles.filter(file => {
+                if (excludedFolders.some(ex => file.path === ex || file.path.startsWith(ex + '/'))) return false;
                 if (file.extension === 'md') return true;
                 if (file.extension === 'pdf') return this.settings.syncPDFs;
                 if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) return this.settings.syncImages;
-
-                return false; // Skip other types
+                return false;
             });
 
             const totalFiles = filesToSync.length;
-            let processedFiles = 0;
-            this.updateStatus(`Gemini Sync: 0/${totalFiles} (0%)`, undefined, true);
+            let processedCount = 0;
+            
+            // Set pour suivre quels fichiers distants sont toujours valides
+            const keptRemotePaths = new Set<string>();
 
+            // 3. Phase de Propagation (Local -> Drive)
             for (const file of filesToSync) {
-                if (this.cancelRequested) {
-                    new Notice('Gemini Sync: Synchronization cancelled.');
-                    this.updateStatus('Gemini Sync: Cancelled', 5000);
-                    return;
-                }
+                if (this.cancelRequested) break;
+                processedCount++;
+                this.updateStatus(`Gemini Sync: Syncing ${processedCount}/${totalFiles}`, undefined, true);
 
                 try {
-                    await this.syncFile(file);
-                } catch (error) {
-                    console.error(`Failed to sync file ${file.path}:`, error);
-                    new Notice(`Failed to sync ${file.path}`);
-                } finally {
-                    processedFiles++;
-                    const percent = Math.round((processedFiles / totalFiles) * 100);
-                    if (!this.cancelRequested) {
-                        this.updateStatus(`Gemini Sync: ${processedFiles}/${totalFiles} (${percent}%)`, undefined, true);
+                    // Calculer le hash local
+                    const localHash = await this.calculateFileHash(file);
+                    const remoteEntry = remoteManifest.files[file.path];
+
+                    // Décision : Upload si inexistant ou modifié
+                    if (!remoteEntry || remoteEntry.hash !== localHash) {
+                        if (!remoteEntry) console.log(`[Sync] New file: ${file.path}`);
+                        else console.log(`[Sync] Modified file: ${file.path}`);
+                        
+                        await this.uploadFile(file, rootId, remoteManifest);
+                    } else {
+                        // Identique : on garde l'entrée telle quelle
+                        // (Optionnel : mettre à jour mtime si besoin, mais pas critique pour le miroir)
                     }
+
+                    // Marquer comme "vu et conservé"
+                    keptRemotePaths.add(file.path);
+
+                } catch (err) {
+                    console.error(`Failed to sync ${file.path}:`, err);
+                    new Notice(`Failed to sync ${file.path}`);
                 }
             }
 
-            new Notice('Gemini Sync: Synchronization complete!');
-            this.updateStatus('Gemini Sync: Ready', 5000);
+            // 4. Phase de Nettoyage (Drive -> Poubelle)
+            // On supprime du Drive tout ce qui est dans le manifeste mais PAS dans keptRemotePaths
+            if (!this.cancelRequested) {
+                this.updateStatus('Gemini Sync: Cleaning remote...', undefined, true);
+                
+                const remotePaths = Object.keys(remoteManifest.files);
+                for (const remotePath of remotePaths) {
+                    // Si le fichier n'a pas été vu lors du scan local...
+                    if (!keptRemotePaths.has(remotePath)) {
+                        
+                        // Sécurité : vérifier si le fichier est dans un dossier exclu
+                        // (Si on a exclu le dossier localement, on ne veut peut-être pas le supprimer du Drive ?)
+                        // Dans une logique "Miroir Strict", on devrait le supprimer. 
+                        // Mais si on veut juste "ignorer", on ajoute cette condition :
+                        const isExcluded = excludedFolders.some(ex => remotePath === ex || remotePath.startsWith(ex + '/'));
+                        
+                        if (!isExcluded) {
+                            console.log(`[Sync] Deleting remote orphan: ${remotePath}`);
+                            try {
+                                const entry = remoteManifest.files[remotePath];
+                                await this.driveClient.deleteFile(entry.driveId);
+                                // Retirer du manifeste
+                                delete remoteManifest.files[remotePath];
+                                delete this.settings.syncIndex[remotePath]; // Nettoyer l'index local aussi
+                            } catch (e) {
+                                console.error(`Failed to delete remote file ${remotePath}:`, e);
+                            }
+                        }
+                    }
+                }
+
+                // 5. Sauvegarder le nouvel état
+                remoteManifest.lastSync = Date.now();
+                await this.manifestManager.saveManifest(rootId, remoteManifest);
+                await this.onSaveSettings();
+
+                new Notice('Gemini Sync: Mirroring complete!');
+                this.updateStatus('Gemini Sync: Ready', 5000);
+            } else {
+                new Notice('Gemini Sync: Cancelled.');
+                this.updateStatus('Gemini Sync: Cancelled', 5000);
+            }
+
+        } catch (globalError) {
+            console.error('Gemini Sync Fatal Error:', globalError);
+            new Notice('Gemini Sync Failed. See console.');
+            this.updateStatus('Gemini Sync: Failed', undefined);
         } finally {
             this.isSyncing = false;
-            // Save settings (including sync index) at the end of sync
-            await this.onSaveSettings();
         }
     }
 
-    private async syncFile(file: TFile): Promise<boolean> {
-        const entry = this.settings.syncIndex[file.path];
-
-        // Optimization: Check mtime first
-        if (entry && entry.lastModified === file.stat.mtime) {
-            return false; // No changes based on mtime
-        }
-
-        let content: any;
-        let hash: string;
-
-        if (file.extension === 'md') {
-            content = await this.app.vault.read(file);
-            hash = CryptoJS.MD5(content).toString();
-        } else {
-            // Binary file
-            const arrayBuffer = await this.app.vault.readBinary(file);
-            // Convert ArrayBuffer to Buffer for Google API
-            content = Buffer.from(arrayBuffer);
-            // MD5 for binary
-            const wordChanged = CryptoJS.lib.WordArray.create(arrayBuffer as any);
-            hash = CryptoJS.MD5(wordChanged).toString();
-        }
-
-        // Double check hash if entry exists
-        if (entry && entry.hash === hash) {
-            // Update mtime in index to avoid re-reading next time
-            this.settings.syncIndex[file.path] = {
-                ...entry,
-                lastModified: file.stat.mtime
-            };
-            // We rely on the final save at the end of syncVault
-            return false;
-        }
-
-        const parentId = await this.ensureFolderStructure(file.parent?.path || '');
+    private async uploadFile(file: TFile, rootId: string, manifest: RemoteManifest) {
+        const content = await this.getFileContent(file);
+        const hash = await this.calculateFileHash(file);
+        
         let mimeType = 'application/octet-stream';
         if (file.extension === 'md') mimeType = 'application/vnd.google-apps.document';
         else if (file.extension === 'pdf') mimeType = 'application/pdf';
         else if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) mimeType = `image/${file.extension === 'jpg' ? 'jpeg' : file.extension}`;
 
-        if (entry) {
-            // Update existing
-            await this.driveClient.updateFile(entry.driveId, content, mimeType);
+        const parentId = await this.ensureFolderStructure(file.parent?.path || '');
+        
+        const existingEntry = manifest.files[file.path];
+        let driveId: string;
 
-            this.settings.syncIndex[file.path] = {
-                ...entry,
-                hash: hash,
-                lastModified: file.stat.mtime
-            };
+        if (existingEntry) {
+            await this.driveClient.updateFile(existingEntry.driveId, content, mimeType);
+            driveId = existingEntry.driveId;
         } else {
-            // File not in local index. Check if it exists on Drive to avoid duplicates.
-            let driveId = await this.driveClient.getFileId(file.name, parentId, mimeType);
-
-            if (driveId) {
-                // Found on Drive! Update it instead of creating new.
-                console.log(`Found existing file on Drive: ${file.path} -> ${driveId}`);
-                await this.driveClient.updateFile(driveId, content, mimeType);
-            } else {
-                // Not found, create new.
-                const name = file.extension === 'md' ? file.basename : file.name;
-                driveId = await this.driveClient.uploadFile(name, content, mimeType, parentId);
-            }
-
-            this.settings.syncIndex[file.path] = {
-                path: file.path,
-                driveId: driveId!, // driveId is definitely assigned here
-                hash: hash,
-                lastModified: file.stat.mtime
-            };
+            // Check if file exists on drive to avoid dups (stale manifest case)
+            // Or just upload new. Trust manifest? 
+            // Let's trust manifest for speed, but maybe check if ID is null
+             driveId = await this.driveClient.uploadFile(
+                file.extension === 'md' ? file.basename : file.name, 
+                content, 
+                mimeType, 
+                parentId
+            );
         }
-        return true;
+
+        // Update Manifest
+        manifest.files[file.path] = {
+            path: file.path,
+            driveId: driveId,
+            hash: hash,
+            modifiedTime: Date.now()
+        };
+
+        // Update Local Index
+        this.settings.syncIndex[file.path] = {
+            path: file.path,
+            driveId: driveId,
+            hash: hash,
+            lastModified: file.stat.mtime
+        };
+    }
+
+    private async getFileContent(file: TFile): Promise<any> {
+        if (file.extension === 'md') {
+            return await this.app.vault.read(file);
+        } else {
+            const buffer = await this.app.vault.readBinary(file);
+            return Buffer.from(buffer);
+        }
+    }
+
+    private async calculateFileHash(file: TFile): Promise<string> {
+        if (file.extension === 'md') {
+            const content = await this.app.vault.read(file);
+            return CryptoJS.MD5(content).toString();
+        } else {
+            const buffer = await this.app.vault.readBinary(file);
+            const word = CryptoJS.lib.WordArray.create(buffer as any);
+            return CryptoJS.MD5(word).toString();
+        }
     }
 
     private async getVaultRoot(): Promise<string> {
         if (this.rootFolderId) return this.rootFolderId;
 
         const rootName = this.settings.remoteFolderPath || this.app.vault.getName();
-        // Check if root folder exists
-        // Explicitly search in 'root' to avoid finding subfolders with the same name (prevents infinite recursion)
         let rootId = await this.driveClient.getFileId(rootName, 'root', 'application/vnd.google-apps.folder');
         if (!rootId) {
             rootId = await this.driveClient.createFolder(rootName);
@@ -277,34 +310,24 @@ export class SyncManager {
 
     private async ensureFolderStructure(path: string): Promise<string> {
         let parentId = await this.getVaultRoot();
-
         if (!path || path === '/') return parentId;
 
-        // Optimization: Check cache first to avoid repeated API calls for files in same folder
-        if (this.folderIdCache.has(path)) {
-            return this.folderIdCache.get(path)!;
-        }
+        if (this.folderIdCache.has(path)) return this.folderIdCache.get(path)!;
 
         const parts = path.split('/');
         let currentPath = '';
 
         for (const part of parts) {
             currentPath = currentPath ? `${currentPath}/${part}` : part;
-
-            // Check cache for this specific level
             if (this.folderIdCache.has(currentPath)) {
                 parentId = this.folderIdCache.get(currentPath)!;
                 continue;
             }
-
-            // Check if we have a folder ID for this part under parentId
             let folderId = await this.driveClient.getFileId(part, parentId, 'application/vnd.google-apps.folder');
             if (!folderId) {
                 folderId = await this.driveClient.createFolder(part, parentId);
             }
             parentId = folderId;
-
-            // Cache this level
             this.folderIdCache.set(currentPath, folderId);
         }
         return parentId;
