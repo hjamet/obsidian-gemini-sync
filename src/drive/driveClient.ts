@@ -125,79 +125,48 @@ export class DriveClient {
      * @returns The ID of the uploaded file.
      */
     async uploadFile(name: string, content: any, mimeType: string, parentId?: string): Promise<string> {
-        const drive = this.getDrive();
-        const fileMetadata: any = {
-            name: name,
-        };
-        if (parentId && parentId !== 'root') {
-            fileMetadata.parents = [parentId];
-        }
-        if (mimeType === 'application/vnd.google-apps.document') {
-            fileMetadata.mimeType = mimeType; // Convert to Google Doc
-        }
+        // Determine source and target MIME types
+        const sourceMimeType = mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType;
+        const targetMimeType = mimeType === 'application/vnd.google-apps.document' ? 'application/vnd.google-apps.document' : undefined;
 
-        let body = content;
-
-        // Handle Buffer specifically by converting to Blob
+        // Convert content to Blob
+        let blob: Blob;
         if (Buffer.isBuffer(content)) {
-            const blob = new Blob([content], { type: mimeType });
-            return this.uploadFileResumable(name, blob, mimeType, parentId);
+            // Convert Buffer to Uint8Array for Blob compatibility
+            blob = new Blob([new Uint8Array(content as any)], { type: sourceMimeType });
+        } else if (typeof content === 'string') {
+            blob = new Blob([content], { type: sourceMimeType });
+        } else {
+            blob = new Blob([JSON.stringify(content)], { type: sourceMimeType });
         }
 
-        const media = {
-            mimeType: mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType,
-            body: body,
-        };
-
-        try {
-            const res = await drive.files.create({
-                requestBody: fileMetadata,
-                media: media,
-                fields: 'id',
-            });
-
-            if (!res.data.id) throw new Error('Failed to upload file');
-            return res.data.id;
-        } catch (error) {
-            console.error('Failed to upload file:', error);
-            throw error;
-        }
+        return this.uploadFileResumable(name, blob, sourceMimeType, parentId, targetMimeType);
     }
 
     /**
      * Updates an existing file in Google Drive.
      */
     async updateFile(fileId: string, content: any, mimeType: string): Promise<void> {
-        // Handle Buffer specifically
+        // Determine source MIME type (no target conversion needed for updates usually, but we keep consistency)
+        const sourceMimeType = mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType;
+
+        // Convert content to Blob
+        let blob: Blob;
         if (Buffer.isBuffer(content)) {
-            const blob = new Blob([content], { type: mimeType });
-            await this.updateFileResumable(fileId, blob, mimeType);
-            return;
+            blob = new Blob([new Uint8Array(content as any)], { type: sourceMimeType });
+        } else if (typeof content === 'string') {
+            blob = new Blob([content], { type: sourceMimeType });
+        } else {
+            blob = new Blob([JSON.stringify(content)], { type: sourceMimeType });
         }
 
-        const drive = this.getDrive();
-        let body = content;
-
-        const media = {
-            mimeType: mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType,
-            body: body,
-        };
-
-        try {
-            await drive.files.update({
-                fileId: fileId,
-                media: media,
-            });
-        } catch (error) {
-            console.error(`Failed to update file ${fileId}:`, error);
-            throw error;
-        }
+        await this.updateFileResumable(fileId, blob, sourceMimeType);
     }
 
     /**
      * Manual Resumable Upload using fetch to bypass googleapis issues with binary files in Electron.
      */
-    async uploadFileResumable(name: string, blob: Blob, mimeType: string, parentId?: string): Promise<string> {
+    async uploadFileResumable(name: string, blob: Blob, sourceMimeType: string, parentId?: string, targetMimeType?: string): Promise<string> {
         try {
             const tokenResponse = await this.oAuth2Client.getAccessToken();
             const accessToken = tokenResponse.token;
@@ -205,6 +174,7 @@ export class DriveClient {
 
             const metadata: any = { name };
             if (parentId && parentId !== 'root') metadata.parents = [parentId];
+            if (targetMimeType) metadata.mimeType = targetMimeType;
 
             // 1. Initiate Resumable Session
             const initRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
@@ -212,7 +182,7 @@ export class DriveClient {
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
                     'Content-Type': 'application/json',
-                    'X-Upload-Content-Type': mimeType,
+                    'X-Upload-Content-Type': sourceMimeType,
                     'X-Upload-Content-Length': blob.size.toString()
                 },
                 body: JSON.stringify(metadata)
@@ -231,7 +201,7 @@ export class DriveClient {
                 method: 'PUT',
                 headers: {
                     'Content-Length': blob.size.toString(),
-                    'Content-Type': mimeType
+                    'Content-Type': sourceMimeType
                 },
                 body: blob
             });
