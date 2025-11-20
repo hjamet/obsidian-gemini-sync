@@ -195,8 +195,18 @@ export class SyncManager {
                             const percentage = Math.round((processedCount / totalFiles) * 100);
                             this.updateStatus(`Gemini Sync: Syncing ${processedCount}/${totalFiles} (${percentage}%)`, undefined, true);
 
-                            // Calculer le hash local
-                            const localHash = await this.calculateFileHash(file);
+                            // OPTIMIZATION: Check mtime to skip re-hashing
+                            let localHash: string;
+                            const cachedEntry = this.settings.syncIndex[file.path];
+
+                            if (cachedEntry && cachedEntry.lastModified === file.stat.mtime && cachedEntry.hash) {
+                                // Trust the cache if mtime hasn't changed
+                                localHash = cachedEntry.hash;
+                            } else {
+                                // Calculate fresh hash
+                                localHash = await this.calculateFileHash(file);
+                            }
+
                             let remoteEntry = remoteManifest!.files[file.path];
 
                             // SMART RECOVERY (Instant check via cache)
@@ -243,6 +253,17 @@ export class SyncManager {
                             // Décision : Upload si inexistant ou modifié
                             if (!remoteEntry || remoteEntry.hash !== localHash) {
                                 await this.uploadFile(file, rootId, remoteManifest!);
+                            } else {
+                                // UPDATE CACHE: If hashes match but local cache is stale, update it
+                                // This ensures next run can use the fast path
+                                if (!this.settings.syncIndex[file.path] || this.settings.syncIndex[file.path].lastModified !== file.stat.mtime) {
+                                     this.settings.syncIndex[file.path] = {
+                                        path: file.path,
+                                        driveId: remoteEntry.driveId,
+                                        hash: localHash,
+                                        lastModified: file.stat.mtime
+                                    };
+                                }
                             }
 
                             keptRemotePaths.add(file.path);

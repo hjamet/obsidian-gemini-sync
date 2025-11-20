@@ -164,6 +164,37 @@ export class DriveClient {
     }
 
     /**
+     * Helper to perform fetch with exponential backoff retry.
+     */
+    private async fetchWithRetry(url: string, init: RequestInit, retries = 3, backoff = 1000): Promise<Response> {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const res = await fetch(url, init);
+                if (res.ok) return res;
+
+                // Check if retryable status code
+                if (res.status === 408 || res.status === 429 || (res.status >= 500 && res.status < 600)) {
+                    const txt = await res.text(); // Consume body to avoid leaks? Not strictly necessary with fetch but good for debugging if needed
+                    console.warn(`Request failed with ${res.status}, retrying (${i + 1}/${retries})...`);
+                    if (i === retries - 1) throw new Error(`Request failed after ${retries} retries: ${res.status} ${txt}`);
+                    
+                    await new Promise(resolve => setTimeout(resolve, backoff));
+                    backoff *= 2;
+                    continue;
+                }
+                
+                return res; // Return non-retryable error response for caller to handle
+            } catch (error) {
+                console.warn(`Network request failed, retrying (${i + 1}/${retries})...`, error);
+                if (i === retries - 1) throw error;
+                await new Promise(resolve => setTimeout(resolve, backoff));
+                backoff *= 2;
+            }
+        }
+        throw new Error('Unreachable');
+    }
+
+    /**
      * Manual Resumable Upload using fetch to bypass googleapis issues with binary files in Electron.
      */
     async uploadFileResumable(name: string, blob: Blob, sourceMimeType: string, parentId?: string, targetMimeType?: string): Promise<string> {
@@ -177,7 +208,7 @@ export class DriveClient {
             if (targetMimeType) metadata.mimeType = targetMimeType;
 
             // 1. Initiate Resumable Session
-            const initRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+            const initRes = await this.fetchWithRetry('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
@@ -197,7 +228,7 @@ export class DriveClient {
             if (!location) throw new Error('No Location header in resumable upload response');
 
             // 2. Upload File Content
-            const uploadRes = await fetch(location, {
+            const uploadRes = await this.fetchWithRetry(location, {
                 method: 'PUT',
                 headers: {
                     'Content-Length': blob.size.toString(),
@@ -230,7 +261,7 @@ export class DriveClient {
             if (!accessToken) throw new Error('No access token available');
 
             // 1. Initiate Resumable Session (PATCH)
-            const initRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable`, {
+            const initRes = await this.fetchWithRetry(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable`, {
                 method: 'PATCH',
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
@@ -250,7 +281,7 @@ export class DriveClient {
             if (!location) throw new Error('No Location header in resumable update response');
 
             // 2. Upload File Content
-            const uploadRes = await fetch(location, {
+            const uploadRes = await this.fetchWithRetry(location, {
                 method: 'PUT',
                 headers: {
                     'Content-Length': blob.size.toString(),
