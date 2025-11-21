@@ -12,6 +12,7 @@ export interface DriveClientOptions {
 }
 
 export class DriveClient {
+    private static readonly SIMPLE_UPLOAD_LIMIT = 5 * 1024 * 1024; // 5MB
     private oAuth2Client: OAuth2Client;
     private options: DriveClientOptions;
 
@@ -126,7 +127,7 @@ export class DriveClient {
      */
     async uploadFile(name: string, content: any, mimeType: string, parentId?: string): Promise<string> {
         // Determine source and target MIME types
-        const sourceMimeType = mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType;
+        const sourceMimeType = mimeType === 'application/vnd.google-apps.document' ? 'text/plain' : mimeType;
         const targetMimeType = mimeType === 'application/vnd.google-apps.document' ? 'application/vnd.google-apps.document' : undefined;
 
         // Convert content to Blob
@@ -140,7 +141,11 @@ export class DriveClient {
             blob = new Blob([JSON.stringify(content)], { type: sourceMimeType });
         }
 
-        return this.uploadFileResumable(name, blob, sourceMimeType, parentId, targetMimeType);
+        if (this.shouldUseResumable(blob)) {
+            return this.uploadFileResumable(name, blob, sourceMimeType, parentId, targetMimeType);
+        }
+
+        return this.uploadFileMultipart(name, blob, sourceMimeType, parentId, targetMimeType);
     }
 
     /**
@@ -148,7 +153,7 @@ export class DriveClient {
      */
     async updateFile(fileId: string, content: any, mimeType: string): Promise<void> {
         // Determine source MIME type (no target conversion needed for updates usually, but we keep consistency)
-        const sourceMimeType = mimeType === 'application/vnd.google-apps.document' ? 'text/markdown' : mimeType;
+        const sourceMimeType = mimeType === 'application/vnd.google-apps.document' ? 'text/plain' : mimeType;
 
         // Convert content to Blob
         let blob: Blob;
@@ -160,7 +165,11 @@ export class DriveClient {
             blob = new Blob([JSON.stringify(content)], { type: sourceMimeType });
         }
 
-        await this.updateFileResumable(fileId, blob, sourceMimeType);
+        if (this.shouldUseResumable(blob)) {
+            await this.updateFileResumable(fileId, blob, sourceMimeType);
+        } else {
+            await this.updateFileMultipart(fileId, blob, sourceMimeType);
+        }
     }
 
     /**
@@ -177,12 +186,12 @@ export class DriveClient {
                     const txt = await res.text(); // Consume body to avoid leaks? Not strictly necessary with fetch but good for debugging if needed
                     console.warn(`Request failed with ${res.status}, retrying (${i + 1}/${retries})...`);
                     if (i === retries - 1) throw new Error(`Request failed after ${retries} retries: ${res.status} ${txt}`);
-                    
+
                     await new Promise(resolve => setTimeout(resolve, backoff));
                     backoff *= 2;
                     continue;
                 }
-                
+
                 return res; // Return non-retryable error response for caller to handle
             } catch (error) {
                 console.warn(`Network request failed, retrying (${i + 1}/${retries})...`, error);
@@ -192,6 +201,108 @@ export class DriveClient {
             }
         }
         throw new Error('Unreachable');
+    }
+
+    /**
+     * Builds the Content-Range header required by the Drive resumable upload API.
+     */
+    private buildContentRange(blob: Blob): string {
+        if (blob.size === 0) {
+            return 'bytes */0';
+        }
+        const lastByteIndex = blob.size - 1;
+        return `bytes 0-${lastByteIndex}/${blob.size}`;
+    }
+
+    private shouldUseResumable(blob: Blob): boolean {
+        return blob.size > DriveClient.SIMPLE_UPLOAD_LIMIT;
+    }
+
+    private buildMultipartBoundary(): string {
+        const rand = Math.random().toString(36).slice(2);
+        return `gemini-sync-${Date.now()}-${rand}`;
+    }
+
+    private async buildMultipartBody(boundary: string, metadata: any, blob: Blob, sourceMimeType: string): Promise<ArrayBuffer> {
+        const delimiter = `--${boundary}\r\n`;
+        const closeDelimiter = `--${boundary}--`;
+        const metadataJson = JSON.stringify(metadata);
+
+        const bodyBlob = new Blob([
+            delimiter,
+            'Content-Type: application/json; charset=UTF-8\r\n\r\n',
+            metadataJson,
+            '\r\n',
+            delimiter,
+            `Content-Type: ${sourceMimeType}\r\n\r\n`,
+            blob,
+            '\r\n',
+            closeDelimiter,
+            '\r\n'
+        ]);
+
+        return bodyBlob.arrayBuffer();
+    }
+
+    private async uploadFileMultipart(name: string, blob: Blob, sourceMimeType: string, parentId?: string, targetMimeType?: string): Promise<string> {
+        const tokenResponse = await this.oAuth2Client.getAccessToken();
+        const accessToken = tokenResponse.token;
+        if (!accessToken) throw new Error('No access token available');
+
+        const metadata: any = { name };
+        if (parentId && parentId !== 'root') metadata.parents = [parentId];
+        if (targetMimeType) metadata.mimeType = targetMimeType;
+
+        const boundary = this.buildMultipartBoundary();
+        const body = await this.buildMultipartBody(boundary, metadata, blob, sourceMimeType);
+        const bodyBytes = new Uint8Array(body);
+        console.log(`Gemini Sync: Multipart upload for ${name}, size: ${blob.size}`);
+
+        const res = await this.fetchWithRetry('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': `multipart/related; boundary=${boundary}`,
+                'Content-Length': bodyBytes.byteLength.toString()
+            },
+            body: bodyBytes
+        });
+
+        if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(`Failed to upload file (multipart): ${res.status} ${txt}`);
+        }
+
+        const result = await res.json();
+        if (!result.id) throw new Error('Upload response missing file ID');
+        return result.id;
+    }
+
+    private async updateFileMultipart(fileId: string, blob: Blob, mimeType: string): Promise<void> {
+        const tokenResponse = await this.oAuth2Client.getAccessToken();
+        const accessToken = tokenResponse.token;
+        if (!accessToken) throw new Error('No access token available');
+
+        const metadata: any = {};
+        const boundary = this.buildMultipartBoundary();
+        const body = await this.buildMultipartBody(boundary, metadata, blob, mimeType);
+        const bodyBytes = new Uint8Array(body);
+        console.log(`Gemini Sync: Multipart update for ${fileId}, size: ${blob.size}`);
+
+        const res = await this.fetchWithRetry(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`, {
+            method: 'PATCH',
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': `multipart/related; boundary=${boundary}`,
+                'Content-Length': bodyBytes.byteLength.toString()
+            },
+            body: bodyBytes
+        });
+
+        if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(`Failed to update file (multipart): ${res.status} ${txt}`);
+        }
     }
 
     /**
@@ -233,13 +344,18 @@ export class DriveClient {
                 if (!location) throw new Error('No Location header in resumable upload response');
 
                 // 2. Upload File Content
+                const contentRange = this.buildContentRange(blob);
+                const buffer = await blob.arrayBuffer();
+                console.log(`Gemini Sync: Uploading content for ${name}, size: ${blob.size}, range: ${contentRange}`);
                 const uploadRes = await this.fetchWithRetry(location, {
                     method: 'PUT',
                     headers: {
+                        'Authorization': `Bearer ${accessToken}`,
                         'Content-Length': blob.size.toString(),
-                        'Content-Type': sourceMimeType
+                        'Content-Type': sourceMimeType,
+                        'Content-Range': contentRange
                     },
-                    body: blob
+                    body: buffer
                 });
 
                 if (!uploadRes.ok) {
@@ -302,13 +418,18 @@ export class DriveClient {
                 if (!location) throw new Error('No Location header in resumable update response');
 
                 // 2. Upload File Content
+                const contentRange = this.buildContentRange(blob);
+                const buffer = await blob.arrayBuffer();
+                console.log(`Gemini Sync: Updating content for ${fileId}, size: ${blob.size}, range: ${contentRange}`);
                 const uploadRes = await this.fetchWithRetry(location, {
                     method: 'PUT',
                     headers: {
+                        'Authorization': `Bearer ${accessToken}`,
                         'Content-Length': blob.size.toString(),
-                        'Content-Type': mimeType
+                        'Content-Type': mimeType,
+                        'Content-Range': contentRange
                     },
-                    body: blob
+                    body: buffer
                 });
 
                 if (!uploadRes.ok) {

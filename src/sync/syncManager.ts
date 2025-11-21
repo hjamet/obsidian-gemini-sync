@@ -157,7 +157,7 @@ export class SyncManager {
             const keptRemotePaths = new Set<string>();
 
             // Concurrency Limit
-            const limit = pLimit(5); // 5 concurrent uploads
+            const limit = pLimit(2); // 2 concurrent uploads
             const promises: Promise<void>[] = [];
 
             // Group files by parent folder for batch caching
