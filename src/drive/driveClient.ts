@@ -198,107 +198,140 @@ export class DriveClient {
      * Manual Resumable Upload using fetch to bypass googleapis issues with binary files in Electron.
      */
     async uploadFileResumable(name: string, blob: Blob, sourceMimeType: string, parentId?: string, targetMimeType?: string): Promise<string> {
-        try {
-            const tokenResponse = await this.oAuth2Client.getAccessToken();
-            const accessToken = tokenResponse.token;
-            if (!accessToken) throw new Error('No access token available');
+        let attempt = 0;
+        const maxAttempts = 3;
 
-            const metadata: any = { name };
-            if (parentId && parentId !== 'root') metadata.parents = [parentId];
-            if (targetMimeType) metadata.mimeType = targetMimeType;
+        while (attempt < maxAttempts) {
+            try {
+                attempt++;
+                const tokenResponse = await this.oAuth2Client.getAccessToken();
+                const accessToken = tokenResponse.token;
+                if (!accessToken) throw new Error('No access token available');
 
-            // 1. Initiate Resumable Session
-            const initRes = await this.fetchWithRetry('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json',
-                    'X-Upload-Content-Type': sourceMimeType,
-                    'X-Upload-Content-Length': blob.size.toString()
-                },
-                body: JSON.stringify(metadata)
-            });
+                const metadata: any = { name };
+                if (parentId && parentId !== 'root') metadata.parents = [parentId];
+                if (targetMimeType) metadata.mimeType = targetMimeType;
 
-            if (!initRes.ok) {
-                const txt = await initRes.text();
-                throw new Error(`Failed to initiate upload: ${initRes.status} ${txt}`);
+                // 1. Initiate Resumable Session
+                const initRes = await this.fetchWithRetry('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`,
+                        'Content-Type': 'application/json',
+                        'X-Upload-Content-Type': sourceMimeType,
+                        'X-Upload-Content-Length': blob.size.toString()
+                    },
+                    body: JSON.stringify(metadata)
+                });
+
+                if (!initRes.ok) {
+                    const txt = await initRes.text();
+                    throw new Error(`Failed to initiate upload: ${initRes.status} ${txt}`);
+                }
+
+                const location = initRes.headers.get('Location');
+                if (!location) throw new Error('No Location header in resumable upload response');
+
+                // 2. Upload File Content
+                const uploadRes = await this.fetchWithRetry(location, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Length': blob.size.toString(),
+                        'Content-Type': sourceMimeType
+                    },
+                    body: blob
+                });
+
+                if (!uploadRes.ok) {
+                    const txt = await uploadRes.text();
+                    throw new Error(`Failed to upload content: ${uploadRes.status} ${txt}`);
+                }
+
+                const result = await uploadRes.json();
+                return result.id;
+
+            } catch (error: any) {
+                // Check for 410 Gone specifically
+                const is410 = error.message?.includes('410') || (error.code === 410) || (error.response?.status === 410);
+
+                if (is410 && attempt < maxAttempts) {
+                    console.warn(`Gemini Sync: Resumable upload session expired (410). Restarting session (attempt ${attempt + 1}/${maxAttempts})...`);
+                    continue; // Retry from scratch (new session)
+                }
+
+                // If not 410 or max attempts reached, rethrow
+                console.error('Manual Resumable Upload failed:', error);
+                throw error;
             }
-
-            const location = initRes.headers.get('Location');
-            if (!location) throw new Error('No Location header in resumable upload response');
-
-            // 2. Upload File Content
-            const uploadRes = await this.fetchWithRetry(location, {
-                method: 'PUT',
-                headers: {
-                    'Content-Length': blob.size.toString(),
-                    'Content-Type': sourceMimeType
-                },
-                body: blob
-            });
-
-            if (!uploadRes.ok) {
-                const txt = await uploadRes.text();
-                throw new Error(`Failed to upload content: ${uploadRes.status} ${txt}`);
-            }
-
-            const result = await uploadRes.json();
-            return result.id;
-
-        } catch (error) {
-            console.error('Manual Resumable Upload failed:', error);
-            throw error;
         }
+        throw new Error('Upload failed unexpectedly');
     }
 
     /**
      * Manual Resumable Update using fetch.
      */
     async updateFileResumable(fileId: string, blob: Blob, mimeType: string): Promise<void> {
-        try {
-            const tokenResponse = await this.oAuth2Client.getAccessToken();
-            const accessToken = tokenResponse.token;
-            if (!accessToken) throw new Error('No access token available');
+        let attempt = 0;
+        const maxAttempts = 3;
 
-            // 1. Initiate Resumable Session (PATCH)
-            const initRes = await this.fetchWithRetry(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable`, {
-                method: 'PATCH',
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                    'Content-Type': 'application/json',
-                    'X-Upload-Content-Type': mimeType,
-                    'X-Upload-Content-Length': blob.size.toString()
-                },
-                body: JSON.stringify({}) // Empty metadata update, just content
-            });
+        while (attempt < maxAttempts) {
+            try {
+                attempt++;
+                const tokenResponse = await this.oAuth2Client.getAccessToken();
+                const accessToken = tokenResponse.token;
+                if (!accessToken) throw new Error('No access token available');
 
-            if (!initRes.ok) {
-                const txt = await initRes.text();
-                throw new Error(`Failed to initiate update: ${initRes.status} ${txt}`);
+                // 1. Initiate Resumable Session (PATCH)
+                const initRes = await this.fetchWithRetry(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Authorization': `Bearer ${accessToken}`,
+                        'Content-Type': 'application/json',
+                        'X-Upload-Content-Type': mimeType,
+                        'X-Upload-Content-Length': blob.size.toString()
+                    },
+                    body: JSON.stringify({}) // Empty metadata update, just content
+                });
+
+                if (!initRes.ok) {
+                    const txt = await initRes.text();
+                    throw new Error(`Failed to initiate update: ${initRes.status} ${txt}`);
+                }
+
+                const location = initRes.headers.get('Location');
+                if (!location) throw new Error('No Location header in resumable update response');
+
+                // 2. Upload File Content
+                const uploadRes = await this.fetchWithRetry(location, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Length': blob.size.toString(),
+                        'Content-Type': mimeType
+                    },
+                    body: blob
+                });
+
+                if (!uploadRes.ok) {
+                    const txt = await uploadRes.text();
+                    throw new Error(`Failed to update content: ${uploadRes.status} ${txt}`);
+                }
+
+                return; // Success
+
+            } catch (error: any) {
+                // Check for 410 Gone specifically
+                const is410 = error.message?.includes('410') || (error.code === 410) || (error.response?.status === 410);
+
+                if (is410 && attempt < maxAttempts) {
+                    console.warn(`Gemini Sync: Resumable update session expired (410). Restarting session (attempt ${attempt + 1}/${maxAttempts})...`);
+                    continue; // Retry from scratch (new session)
+                }
+
+                console.error('Manual Resumable Update failed:', error);
+                throw error;
             }
-
-            const location = initRes.headers.get('Location');
-            if (!location) throw new Error('No Location header in resumable update response');
-
-            // 2. Upload File Content
-            const uploadRes = await this.fetchWithRetry(location, {
-                method: 'PUT',
-                headers: {
-                    'Content-Length': blob.size.toString(),
-                    'Content-Type': mimeType
-                },
-                body: blob
-            });
-
-            if (!uploadRes.ok) {
-                const txt = await uploadRes.text();
-                throw new Error(`Failed to update content: ${uploadRes.status} ${txt}`);
-            }
-
-        } catch (error) {
-            console.error('Manual Resumable Update failed:', error);
-            throw error;
         }
+        throw new Error('Update failed unexpectedly');
     }
 
     /**
