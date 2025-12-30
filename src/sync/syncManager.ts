@@ -172,9 +172,51 @@ export class SyncManager {
             const limit = pLimit(2); // 2 concurrent uploads
             const promises: Promise<void>[] = [];
 
-            // Group files by parent folder for batch caching
-            const filesByFolder = new Map<string, TFile[]>();
+            // 3. Phase de Propagation (Local -> Drive) - Optimized Diff
+            const filesToUpload: TFile[] = [];
+            
+            // Pre-calculation pass: Filter out files that don't need syncing locally
+            this.updateStatus('Gemini Sync: Checking local changes...', undefined, true);
+            
             for (const file of filesToSync) {
+                 if (this.cancelRequested) break;
+
+                // OPTIMIZATION: Check mtime to skip re-hashing
+                let localHash: string;
+                const cachedEntry = this.settings.syncIndex[file.path];
+
+                if (cachedEntry && cachedEntry.lastModified === file.stat.mtime && cachedEntry.hash) {
+                    // Trust the cache if mtime hasn't changed
+                    localHash = cachedEntry.hash;
+                } else {
+                    // Calculate fresh hash
+                    localHash = await this.calculateFileHash(file);
+                }
+
+                const remoteEntry = remoteManifest!.files[file.path];
+
+                // If remote exists and hash matches, SKIP upload & API calls
+                if (remoteEntry && remoteEntry.hash === localHash) {
+                    // Update usage index (cache)
+                    if (!this.settings.syncIndex[file.path] || this.settings.syncIndex[file.path].lastModified !== file.stat.mtime) {
+                        this.settings.syncIndex[file.path] = {
+                            path: file.path,
+                            driveId: remoteEntry.driveId,
+                            hash: localHash,
+                            lastModified: file.stat.mtime
+                        };
+                    }
+                    keptRemotePaths.add(file.path);
+                    processedCount++; // Validated as "synced" (no-op)
+                } else {
+                    // Needs upload or check
+                    filesToUpload.push(file);
+                }
+            }
+
+            // Sync only what's needed
+            const filesByFolder = new Map<string, TFile[]>();
+            for (const file of filesToUpload) {
                 const parentPath = file.parent?.path || '';
                 if (!filesByFolder.has(parentPath)) {
                     filesByFolder.set(parentPath, []);
@@ -186,11 +228,14 @@ export class SyncManager {
             let lastSaveTime = Date.now();
             let filesSinceLastSave = 0;
 
-            // 3. Phase de Propagation (Local -> Drive) - Grouped by Folder
+            if (filesToUpload.length === 0) {
+                 new Notice('Gemini Sync: No changes so far.');
+            }
+
             for (const [folderPath, folderFiles] of filesByFolder) {
                 if (this.cancelRequested) break;
 
-                // Ensure folder exists and cache its ID
+                // Ensure folder exists and cache its ID (Only for dirty folders)
                 const parentId = await this.ensureFolderStructure(folderPath);
 
                 // Pre-fetch all files in this remote folder (Batching)
@@ -207,21 +252,20 @@ export class SyncManager {
                             const percentage = Math.round((processedCount / totalFiles) * 100);
                             this.updateStatus(`Gemini Sync: Syncing ${processedCount}/${totalFiles} (${percentage}%)`, undefined, true);
 
-                            // OPTIMIZATION: Check mtime to skip re-hashing
+                            // Re-calculate hash (fast, maybe cached in memory if we optimized further, but safe here)
+                            // Actually we calculated it above but didn't store it for the loop. 
+                            // Let's re-use cache or calc again.
                             let localHash: string;
                             const cachedEntry = this.settings.syncIndex[file.path];
-
-                            if (cachedEntry && cachedEntry.lastModified === file.stat.mtime && cachedEntry.hash) {
-                                // Trust the cache if mtime hasn't changed
+                             if (cachedEntry && cachedEntry.lastModified === file.stat.mtime && cachedEntry.hash) {
                                 localHash = cachedEntry.hash;
                             } else {
-                                // Calculate fresh hash
                                 localHash = await this.calculateFileHash(file);
                             }
 
                             let remoteEntry = remoteManifest!.files[file.path];
 
-                            // SMART RECOVERY (Instant check via cache)
+                            // SMART RECOVERY (Instant check via cache for what we thought was missing)
                             if (!remoteEntry) {
                                 const searchName = file.extension === 'md' ? file.basename : file.name;
                                 const existingFile = remoteFolderCache.get(searchName);
@@ -266,8 +310,7 @@ export class SyncManager {
                             if (!remoteEntry || remoteEntry.hash !== localHash) {
                                 await this.uploadFile(file, rootId, remoteManifest!);
                             } else {
-                                // UPDATE CACHE: If hashes match but local cache is stale, update it
-                                // This ensures next run can use the fast path
+                                // Should be caught by pre-filter, but if Smart Recovery found it just now:
                                 if (!this.settings.syncIndex[file.path] || this.settings.syncIndex[file.path].lastModified !== file.stat.mtime) {
                                     this.settings.syncIndex[file.path] = {
                                         path: file.path,
@@ -296,8 +339,6 @@ export class SyncManager {
                         }
                     }));
                 }
-                // Wait for all tasks in this folder (optional, but safer for structure)
-                // Actually, better to let them run concurrently globally
             }
 
             // Wait for all file uploads to finish
