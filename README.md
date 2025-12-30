@@ -13,6 +13,7 @@ This plugin performs **unidirectional** synchronization (Obsidian → Google Dri
 - **Restart resilience** : Synchronization state is saved locally to avoid unnecessary re-uploads after restart
 - **Force Resync** : Emergency button to completely reset synchronization and clean the remote folder
 - **Automatic conversion** : `.md` files are converted to Google Docs
+- **Project Memory Bridge** : Automatically creates Project notes in Obsidian from Google Tasks (marked with `[PROJET]`)
 - **Binary support** : Reliable synchronization of PDFs and images (PDF, PNG, JPG, GIF)
 - **Change detection** : Only new or modified files are synchronized
 - **Cancellation** : Ability to cancel an ongoing synchronization via the status bar
@@ -96,6 +97,9 @@ To use this plugin, you need to configure a Google Cloud project and create OAut
 4. Return to the library ("Library").
 5. Search for **"Google Docs API"**.
 6. Click on it and then click **"Enable"**.
+7. Return to the library.
+8. Search for **"Google Tasks API"**.
+9. Click on it and then click **"Enable"**.
 
 #### Step 3: Configure OAuth Consent Screen
 
@@ -109,6 +113,7 @@ To use this plugin, you need to configure a Google Cloud project and create OAut
 5. **Scopes** : You can skip this step or add manually:
    - `.../auth/drive.file`
    - `.../auth/documents`
+   - `.../auth/tasks`
    but this is not strictly required here as the plugin will request permissions during authentication.
 6. **Test users** : Add your Google email address (the one you will use to log in). **This is important because the app is in "Testing" mode.**
 7. Click **"Save and Continue"** until the end.
@@ -133,8 +138,20 @@ To use this plugin, you need to configure a Google Cloud project and create OAut
    - Copy the authorization code provided by Google.
    - Paste it in the **"Auth Code"** field of the plugin and validate.
 3. (Optional) Configure the **Remote Folder** if you want your files to be in a specific subfolder of your Drive.
+4. (Optional) Enable **Project Sync** to automatically import tasks starting with `[PROJET]` from Google Tasks as new notes.
+
+### Using Project Memory Bridge
+
+1. **Create a Task**: In Google Tasks, create a task starting with `[PROJET]` (e.g., `[PROJET] New Website`).
+2. **Add Details**: Add a description (notes) and optionally a due date.
+3. **Sync**: Run "Sync Now" in Obsidian.
+4. **Result**:
+   - A new note is created in your configured Projects folder.
+   - The note contains the description and frontmatter with `deadline` and `tags`.
+   - The task is marked as completed in Google Tasks.
 
 ## Important Files
+
 
 - `[src/main.ts](mdc:src/main.ts)` : Obsidian plugin entry point
   - *Role* : Initializes the plugin, loads configuration, manages commands

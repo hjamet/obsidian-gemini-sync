@@ -45,7 +45,8 @@ export class DriveClient {
     generateAuthUrl(): string {
         const scopes = [
             'https://www.googleapis.com/auth/drive.file',
-            'https://www.googleapis.com/auth/documents'
+            'https://www.googleapis.com/auth/documents',
+            'https://www.googleapis.com/auth/tasks'
         ];
 
         return this.oAuth2Client.generateAuthUrl({
@@ -89,6 +90,13 @@ export class DriveClient {
      */
     getDocs() {
         return google.docs({ version: 'v1', auth: this.oAuth2Client });
+    }
+
+    /**
+     * Returns the initialized Tasks API client.
+     */
+    getTasks() {
+        return google.tasks({ version: 'v1', auth: this.oAuth2Client });
     }
 
     /**

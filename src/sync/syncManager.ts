@@ -4,6 +4,8 @@ import * as CryptoJS from 'crypto-js';
 import { GeminiSyncSettings } from '../main';
 import { ManifestManager, RemoteEntry, RemoteManifest } from './remoteManifest';
 import { pLimit } from './concurrency';
+import { TasksClient } from '../drive/tasksClient';
+import { ProjectManager } from './projectManager';
 
 export class SyncManager {
     app: App;
@@ -13,6 +15,7 @@ export class SyncManager {
     isSyncing: boolean = false;
     cancelRequested: boolean = false;
     manifestManager: ManifestManager;
+    projectManager: ProjectManager;
     private rootFolderId: string | null = null;
     private folderIdCache: Map<string, string> = new Map();
     onSaveSettings: () => Promise<void>;
@@ -24,6 +27,9 @@ export class SyncManager {
         this.statusBarItem = statusBarItem || null;
         this.onSaveSettings = onSaveSettings;
         this.manifestManager = new ManifestManager(driveClient);
+
+        const tasksClient = new TasksClient(driveClient);
+        this.projectManager = new ProjectManager(app, tasksClient, settings);
     }
 
     public updateSettings(settings: GeminiSyncSettings) {
@@ -32,11 +38,14 @@ export class SyncManager {
             this.folderIdCache.clear();
         }
         this.settings = settings;
+        this.projectManager.updateSettings(settings);
     }
 
     public updateDriveClient(driveClient: DriveClient) {
         this.driveClient = driveClient;
         this.manifestManager = new ManifestManager(driveClient);
+        const tasksClient = new TasksClient(driveClient);
+        this.projectManager = new ProjectManager(this.app, tasksClient, this.settings);
     }
 
     public cancelSync() {
@@ -125,6 +134,9 @@ export class SyncManager {
         try {
             new Notice('Gemini Sync: Starting strict mirror sync...');
             this.updateStatus('Gemini Sync: Initializing...', undefined, true);
+
+            // 0. Sync Projects from Tasks
+            await this.projectManager.syncProjects();
 
             // Wait for Obsidian Sync to finish if active
             await this.waitForObsidianSync();
@@ -257,7 +269,7 @@ export class SyncManager {
                                 // UPDATE CACHE: If hashes match but local cache is stale, update it
                                 // This ensures next run can use the fast path
                                 if (!this.settings.syncIndex[file.path] || this.settings.syncIndex[file.path].lastModified !== file.stat.mtime) {
-                                     this.settings.syncIndex[file.path] = {
+                                    this.settings.syncIndex[file.path] = {
                                         path: file.path,
                                         driveId: remoteEntry.driveId,
                                         hash: localHash,

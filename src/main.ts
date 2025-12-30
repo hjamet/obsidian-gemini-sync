@@ -26,6 +26,10 @@ export interface GeminiSyncSettings {
     syncInterval: number; // in minutes
     excludedFolders: string[];
     syncIndex: SyncIndex;
+    // Project Sync Settings
+    projectsFolderPath: string;
+    enableTaskSync: boolean;
+    deleteTaskAfterSync: boolean;
 }
 
 const DEFAULT_SETTINGS: GeminiSyncSettings = {
@@ -38,7 +42,10 @@ const DEFAULT_SETTINGS: GeminiSyncSettings = {
     syncPDFs: true,
     syncInterval: 60,
     excludedFolders: [],
-    syncIndex: {}
+    syncIndex: {},
+    projectsFolderPath: 'Projects', // Default folder
+    enableTaskSync: true,
+    deleteTaskAfterSync: true
 }
 
 export default class GeminiSyncPlugin extends Plugin {
@@ -235,6 +242,44 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     this.plugin.settings.syncPDFs = value;
                     await this.plugin.saveSettings();
                 }));
+        
+        containerEl.createEl('h3', { text: 'Project Sync Options' });
+
+        new Setting(containerEl)
+            .setName('Enable Task Sync')
+            .setDesc('Create Project notes from Google Tasks starting with [PROJET].')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableTaskSync)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableTaskSync = value;
+                    await this.plugin.saveSettings();
+                    this.display(); // Refresh to show/hide dependent settings
+                }));
+
+        if (this.plugin.settings.enableTaskSync) {
+            new Setting(containerEl)
+                .setName('Projects Folder')
+                .setDesc('Folder where new Project notes will be created.')
+                .addButton(button => button
+                    .setButtonText(this.plugin.settings.projectsFolderPath || 'Select Folder')
+                    .onClick(() => {
+                        new FolderSuggestModal(this.app, async (folder) => {
+                            this.plugin.settings.projectsFolderPath = folder.path;
+                            await this.plugin.saveSettings();
+                            this.display();
+                        }).open();
+                    }));
+
+            new Setting(containerEl)
+                .setName('Complete Tasks After Sync')
+                .setDesc('Mark tasks as completed in Google Tasks after creating the note.')
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.deleteTaskAfterSync)
+                    .onChange(async (value) => {
+                        this.plugin.settings.deleteTaskAfterSync = value;
+                        await this.plugin.saveSettings();
+                    }));
+        }
 
         new Setting(containerEl)
             .setName('Sync Interval')
