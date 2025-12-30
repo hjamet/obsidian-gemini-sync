@@ -37,9 +37,10 @@ export class TasksClient {
                 return [];
             }
 
-            // Filter for tasks starting with [PROJET] (case insensitive if desired, but user said [PROJET])
-            const projectTasks = res.data.items.filter(task => 
-                task.title && task.title.trim().startsWith('[PROJET]')
+            // Filter for tasks containing [PROJET] (case insensitive if desired, but user said [PROJET])
+            console.log('Gemini Sync: All tasks fetched:', res.data.items?.map(t => t.title));
+            const projectTasks = res.data.items.filter(task =>
+                task.title && task.title.includes('[PROJET]')
             );
 
             return projectTasks.map(t => ({

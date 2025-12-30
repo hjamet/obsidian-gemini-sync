@@ -62,11 +62,11 @@ export class ProjectManager {
     }
 
     private async processTask(task: TaskItem) {
-        // Parse Title: "[PROJET] My Project" -> "My Project"
-        const rawTitle = task.title.replace(/^\[PROJET\]\s*/i, '').trim();
+        // Parse Title: remove "[PROJET]" tag from anywhere
+        const rawTitle = task.title.replace(/\[PROJET\]/gi, '').trim();
         // Sanitize filename
         const safeTitle = rawTitle.replace(/[\\/:*?"<>|]/g, '-');
-        
+
         const folderPath = this.settings.projectsFolderPath || '';
         const filePath = normalizePath(`${folderPath}/${safeTitle}.md`);
 
@@ -82,6 +82,15 @@ export class ProjectManager {
         const frontmatter = this.buildFrontmatter(task);
         const content = `${frontmatter}\n\n${task.notes || ''}`;
 
+        // Ensure folder exists
+        if (folderPath) {
+            const folder = this.app.vault.getAbstractFileByPath(folderPath);
+            if (!folder) {
+                await this.app.vault.createFolder(folderPath);
+                console.log(`Gemini Sync: Created projects folder at ${folderPath}`);
+            }
+        }
+
         // Create File
         await this.app.vault.create(filePath, content);
         console.log(`Gemini Sync: Created project note at ${filePath}`);
@@ -89,7 +98,7 @@ export class ProjectManager {
 
     private buildFrontmatter(task: TaskItem): string {
         const lines = ['---'];
-        
+
         // Tags
         // Add specific project tag if configured or default #project? 
         // User asked: "Tagging : Ajouter automatiquement le tag #task dans la note Obsidian créée"
@@ -101,7 +110,7 @@ export class ProjectManager {
         // Let's add #task and #project.
         lines.push('tags:');
         lines.push('  - task');
-        lines.push('  - project'); 
+        lines.push('  - project');
 
         // Deadline
         if (task.due) {

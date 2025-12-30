@@ -264,7 +264,7 @@ export class DriveClient {
         const boundary = this.buildMultipartBoundary();
         const body = await this.buildMultipartBody(boundary, metadata, blob, sourceMimeType);
         const bodyBytes = new Uint8Array(body);
-        console.log(`Gemini Sync: Multipart upload for ${name}, size: ${blob.size}`);
+        // console.log(`Gemini Sync: Multipart upload for ${name}, size: ${blob.size}`);
 
         const res = await this.fetchWithRetry('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
             method: 'POST',
@@ -295,7 +295,7 @@ export class DriveClient {
         const boundary = this.buildMultipartBoundary();
         const body = await this.buildMultipartBody(boundary, metadata, blob, mimeType);
         const bodyBytes = new Uint8Array(body);
-        console.log(`Gemini Sync: Multipart update for ${fileId}, size: ${blob.size}`);
+        // console.log(`Gemini Sync: Multipart update for ${fileId}, size: ${blob.size}`);
 
         const res = await this.fetchWithRetry(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`, {
             method: 'PATCH',
