@@ -23,6 +23,7 @@ export interface GeminiSyncSettings {
     syncOnStartup: boolean;
     syncImages: boolean;
     syncPDFs: boolean;
+    syncCanvas: boolean;
     syncInterval: number; // in minutes
     excludedFolders: string[];
     syncIndex: SyncIndex;
@@ -40,6 +41,7 @@ const DEFAULT_SETTINGS: GeminiSyncSettings = {
     syncOnStartup: true,
     syncImages: true,
     syncPDFs: true,
+    syncCanvas: true,
     syncInterval: 60,
     excludedFolders: [],
     syncIndex: {},
@@ -56,6 +58,7 @@ export default class GeminiSyncPlugin extends Plugin {
     statusBarItem: HTMLElement;
 
     async onload() {
+        console.log('Gemini Sync: Loading v1.8.0 with Canvas Support');
         await this.loadSettings();
 
         this.initializeDriveClient();
@@ -242,7 +245,17 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     this.plugin.settings.syncPDFs = value;
                     await this.plugin.saveSettings();
                 }));
-        
+
+        new Setting(containerEl)
+            .setName('Sync Canvas')
+            .setDesc('Convert and sync .canvas files as Google Docs.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.syncCanvas)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncCanvas = value;
+                    await this.plugin.saveSettings();
+                }));
+
         containerEl.createEl('h3', { text: 'Project Sync Options' });
 
         new Setting(containerEl)

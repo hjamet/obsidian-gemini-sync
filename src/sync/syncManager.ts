@@ -6,6 +6,7 @@ import { ManifestManager, RemoteEntry, RemoteManifest } from './remoteManifest';
 import { pLimit } from './concurrency';
 import { TasksClient } from '../drive/tasksClient';
 import { ProjectManager } from './projectManager';
+import { CanvasConverter } from '../convert/canvasConverter';
 
 export class SyncManager {
     app: App;
@@ -16,6 +17,7 @@ export class SyncManager {
     cancelRequested: boolean = false;
     manifestManager: ManifestManager;
     projectManager: ProjectManager;
+    canvasConverter: CanvasConverter;
     private rootFolderId: string | null = null;
     private folderIdCache: Map<string, string> = new Map();
     onSaveSettings: () => Promise<void>;
@@ -30,6 +32,7 @@ export class SyncManager {
 
         const tasksClient = new TasksClient(driveClient);
         this.projectManager = new ProjectManager(app, tasksClient, settings);
+        this.canvasConverter = new CanvasConverter(app);
     }
 
     public updateSettings(settings: GeminiSyncSettings) {
@@ -158,6 +161,7 @@ export class SyncManager {
                 if (excludedFolders.some(ex => file.path === ex || file.path.startsWith(ex + '/'))) return false;
                 if (file.extension === 'md') return true;
                 if (file.extension === 'pdf') return this.settings.syncPDFs;
+                if (file.extension === 'canvas') return this.settings.syncCanvas;
                 if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) return this.settings.syncImages;
                 return false;
             });
@@ -174,12 +178,12 @@ export class SyncManager {
 
             // 3. Phase de Propagation (Local -> Drive) - Optimized Diff
             const filesToUpload: TFile[] = [];
-            
+
             // Pre-calculation pass: Filter out files that don't need syncing locally
             this.updateStatus('Gemini Sync: Checking local changes...', undefined, true);
-            
+
             for (const file of filesToSync) {
-                 if (this.cancelRequested) break;
+                if (this.cancelRequested) break;
 
                 // OPTIMIZATION: Check mtime to skip re-hashing
                 let localHash: string;
@@ -229,7 +233,7 @@ export class SyncManager {
             let filesSinceLastSave = 0;
 
             if (filesToUpload.length === 0) {
-                 new Notice('Gemini Sync: No changes so far.');
+                new Notice('Gemini Sync: No changes so far.');
             }
 
             for (const [folderPath, folderFiles] of filesByFolder) {
@@ -257,7 +261,7 @@ export class SyncManager {
                             // Let's re-use cache or calc again.
                             let localHash: string;
                             const cachedEntry = this.settings.syncIndex[file.path];
-                             if (cachedEntry && cachedEntry.lastModified === file.stat.mtime && cachedEntry.hash) {
+                            if (cachedEntry && cachedEntry.lastModified === file.stat.mtime && cachedEntry.hash) {
                                 localHash = cachedEntry.hash;
                             } else {
                                 localHash = await this.calculateFileHash(file);
@@ -267,12 +271,13 @@ export class SyncManager {
 
                             // SMART RECOVERY (Instant check via cache for what we thought was missing)
                             if (!remoteEntry) {
-                                const searchName = file.extension === 'md' ? file.basename : file.name;
+                                const isDocType = file.extension === 'md' || file.extension === 'canvas';
+                                const searchName = isDocType ? file.basename : file.name;
                                 const existingFile = remoteFolderCache.get(searchName);
 
                                 if (existingFile) {
                                     let isUpToDate = false;
-                                    if (file.extension === 'md') {
+                                    if (isDocType) {
                                         const remoteModTime = existingFile.modifiedTime ? new Date(existingFile.modifiedTime).getTime() : 0;
                                         if (remoteModTime > file.stat.mtime) isUpToDate = true;
                                     } else {
@@ -394,7 +399,7 @@ export class SyncManager {
         const hash = await this.calculateFileHash(file);
 
         let mimeType = 'application/octet-stream';
-        if (file.extension === 'md') mimeType = 'application/vnd.google-apps.document';
+        if (file.extension === 'md' || file.extension === 'canvas') mimeType = 'application/vnd.google-apps.document';
         else if (file.extension === 'pdf') mimeType = 'application/pdf';
         else if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) mimeType = `image/${file.extension === 'jpg' ? 'jpeg' : file.extension}`;
 
@@ -411,7 +416,7 @@ export class SyncManager {
             // Or just upload new. Trust manifest? 
             // Let's trust manifest for speed, but maybe check if ID is null
             driveId = await this.driveClient.uploadFile(
-                file.extension === 'md' ? file.basename : file.name,
+                (file.extension === 'md' || file.extension === 'canvas') ? file.basename : file.name,
                 content,
                 mimeType,
                 parentId
@@ -438,6 +443,8 @@ export class SyncManager {
     private async getFileContent(file: TFile): Promise<any> {
         if (file.extension === 'md') {
             return await this.app.vault.read(file);
+        } else if (file.extension === 'canvas') {
+            return await this.canvasConverter.generateCanvasMarkdown(file);
         } else {
             const buffer = await this.app.vault.readBinary(file);
             return Buffer.from(buffer);
@@ -447,6 +454,10 @@ export class SyncManager {
     private async calculateFileHash(file: TFile): Promise<string> {
         if (file.extension === 'md') {
             const content = await this.app.vault.read(file);
+            return CryptoJS.MD5(content).toString();
+        } else if (file.extension === 'canvas') {
+            // Hash the generated content so we detect changes in structure or embedded notes
+            const content = await this.canvasConverter.generateCanvasMarkdown(file);
             return CryptoJS.MD5(content).toString();
         } else {
             const buffer = await this.app.vault.readBinary(file);
