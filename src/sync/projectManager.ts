@@ -133,7 +133,8 @@ export class ProjectManager {
         const lines = ['---'];
 
         lines.push('tags:');
-        lines.push('  - tâche_venant_de_Google_Task');
+        lines.push('  - gtask');
+        lines.push('  - project');
         lines.push(`googleTaskId: ${task.id}`);
         lines.push(`status: active`);
 
