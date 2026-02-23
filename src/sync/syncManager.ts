@@ -8,6 +8,8 @@ import { TasksClient } from '../drive/tasksClient';
 import { ProjectManager } from './projectManager';
 import { CanvasConverter } from '../convert/canvasConverter';
 
+const yieldToEventLoop = () => new Promise(resolve => setTimeout(resolve, 0));
+
 export class SyncManager {
     app: App;
     driveClient: DriveClient;
@@ -182,8 +184,14 @@ export class SyncManager {
             // Pre-calculation pass: Filter out files that don't need syncing locally
             this.updateStatus('Gemini Sync: Checking local changes...', undefined, true);
 
+            let checkCount = 0;
             for (const file of filesToSync) {
                 if (this.cancelRequested) break;
+
+                // Yield to event loop to prevent Obsidian UI freeze during heavy hashing
+                if (++checkCount % 20 === 0) {
+                    await yieldToEventLoop();
+                }
 
                 // OPTIMIZATION: Check mtime to skip re-hashing
                 let localHash: string;
@@ -250,6 +258,8 @@ export class SyncManager {
 
                     promises.push(limit(async () => {
                         if (this.cancelRequested) return;
+
+                        await yieldToEventLoop();
 
                         try {
                             processedCount++;
@@ -354,7 +364,10 @@ export class SyncManager {
                 this.updateStatus('Gemini Sync: Cleaning remote...', undefined, true);
 
                 const remotePaths = Object.keys(remoteManifest.files);
+                let cleanCount = 0;
                 for (const remotePath of remotePaths) {
+                    if (++cleanCount % 50 === 0) await yieldToEventLoop();
+
                     if (!keptRemotePaths.has(remotePath)) {
                         const isExcluded = excludedFolders.some(ex => remotePath === ex || remotePath.startsWith(ex + '/'));
                         if (!isExcluded) {
