@@ -140,8 +140,8 @@ export class SyncManager {
             new Notice('Gemini Sync: Starting strict mirror sync...');
             this.updateStatus('Gemini Sync: Initializing...', undefined, true);
 
-            // 0. Sync Projects from Tasks
-            await this.projectManager.syncProjects();
+            // 0. Sync Tasks from Google Tasks
+            await this.projectManager.syncTasks();
 
             // Wait for Obsidian Sync to finish if active
             await this.waitForObsidianSync();

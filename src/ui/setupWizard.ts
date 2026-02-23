@@ -175,13 +175,25 @@ export class SetupWizardModal extends Modal {
                 }));
 
         new Setting(container)
-            .setName('Authorization Code')
-            .setDesc('Paste the code obtained after login')
+            .setName('Authorization Code (or URL)')
+            .setDesc('Paste the code or the full http://127.0.0.1 URL obtained after login. (It is normal if the page says "Site can\'t be reached")')
             .addText(text => text
-                .setPlaceholder('Paste code here')
+                .setPlaceholder('Paste code or URL here')
                 .onChange(async (value) => {
+                    let codeToUse = value.trim();
+                    if (codeToUse.startsWith('http')) {
+                        try {
+                            const url = new URL(codeToUse);
+                            const extracted = url.searchParams.get('code');
+                            if (extracted) {
+                                codeToUse = extracted;
+                            }
+                        } catch (e) { }
+                    }
+                    if (!codeToUse) return;
+
                     try {
-                        await this.plugin.driveClient.authorize(value);
+                        await this.plugin.driveClient.authorize(codeToUse);
                         new Notice('Authentication successful!');
                         // Refresh UI or show success indicator
                         const successMsg = container.createEl('p', { text: '✅ Connected successfully!', cls: 'gemini-sync-success' });

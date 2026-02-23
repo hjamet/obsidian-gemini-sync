@@ -21,10 +21,10 @@ export class TasksClient {
     }
 
     /**
-     * Lists tasks from the default list that start with [PROJET].
+     * Lists all active tasks from the default list.
      * Only returns tasks that are not 'completed' (hidden).
      */
-    async listProjectTasks(): Promise<TaskItem[]> {
+    async listActiveTasks(): Promise<TaskItem[]> {
         const service = this.getService();
         try {
             const res = await service.tasks.list({
@@ -37,13 +37,9 @@ export class TasksClient {
                 return [];
             }
 
-            // Filter for tasks containing [PROJET] (case insensitive if desired, but user said [PROJET])
             console.log('Gemini Sync: All tasks fetched:', res.data.items?.map(t => t.title));
-            const projectTasks = res.data.items.filter(task =>
-                task.title && task.title.includes('[PROJET]')
-            );
 
-            return projectTasks.map(t => ({
+            return res.data.items.map(t => ({
                 id: t.id!,
                 title: t.title!,
                 notes: t.notes || '',
@@ -56,6 +52,31 @@ export class TasksClient {
             // Fail-fast principle: propagate error if it's critical, or return empty if it's just network?
             // "Fail-Fast: Si une condition attendue n'est pas remplie, le script DOIT échouer de manière explicite"
             throw new Error(`Failed to list tasks from Google: ${error.message}`);
+        }
+    }
+
+    /**
+     * Fetches a specific task by ID.
+     */
+    async getTask(taskId: string): Promise<TaskItem | null> {
+        const service = this.getService();
+        try {
+            const res = await service.tasks.get({
+                tasklist: '@default',
+                task: taskId
+            });
+            const t = res.data;
+            if (!t) return null;
+            return {
+                id: t.id!,
+                title: t.title!,
+                notes: t.notes || '',
+                due: t.due || undefined,
+                status: t.status!
+            };
+        } catch (error) {
+            console.error(`Gemini Sync: Failed to get task ${taskId}`, error);
+            return null; // If task is deleted or inaccessible, return null
         }
     }
 

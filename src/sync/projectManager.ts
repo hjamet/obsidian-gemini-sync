@@ -17,52 +17,84 @@ export class ProjectManager {
         this.settings = settings;
     }
 
-    async syncProjects() {
+    async syncTasks() {
         if (!this.settings.enableTaskSync) {
             return;
         }
 
-        console.log('Gemini Sync: Starting Project Sync...');
+        console.log('Gemini Sync: Starting Google Tasks Sync...');
 
         try {
-            // 1. Fetch [PROJET] tasks
-            const tasks = await this.tasksClient.listProjectTasks();
+            // 1. Check local tasks for remote completion
+            await this.checkCompletedTasks();
+
+            // 2. Fetch all active tasks
+            const tasks = await this.tasksClient.listActiveTasks();
             if (tasks.length === 0) {
-                console.log('Gemini Sync: No project tasks found.');
+                console.log('Gemini Sync: No active tasks found to import.');
                 return;
             }
 
-            console.log(`Gemini Sync: Found ${tasks.length} project tasks to import.`);
+            console.log(`Gemini Sync: Found ${tasks.length} active tasks to import.`);
 
             let importedCount = 0;
 
             for (const task of tasks) {
                 try {
-                    await this.processTask(task);
-                    importedCount++;
+                    const created = await this.processTask(task);
+                    if (created) {
+                        importedCount++;
 
-                    // 2. Ack task (Complete or Delete based on settings - logic is currently "Complete" as per UI)
-                    if (this.settings.deleteTaskAfterSync) {
-                        await this.tasksClient.completeTask(task.id);
+                        // 3. Ack task if configured
+                        if (this.settings.deleteTaskAfterSync) {
+                            await this.tasksClient.completeTask(task.id);
+                        }
                     }
                 } catch (taskError) {
                     console.error(`Gemini Sync: Failed to process task "${task.title}"`, taskError);
-                    new Notice(`Failed to import project: ${task.title}`);
+                    new Notice(`Failed to import task: ${task.title}`);
                 }
             }
 
             if (importedCount > 0) {
-                new Notice(`Gemini Sync: Imported ${importedCount} project(s) from Tasks.`);
+                new Notice(`Gemini Sync: Imported ${importedCount} task(s) from Google Tasks.`);
             }
 
         } catch (error) {
-            console.error('Gemini Sync: Project Sync failed', error);
-            new Notice(`Project Sync failed: ${error.message}`);
+            console.error('Gemini Sync: Google Tasks Sync failed', error);
+            new Notice(`Google Tasks Sync failed: ${error.message}`);
         }
     }
 
-    private async processTask(task: TaskItem) {
-        // Parse Title: remove "[PROJET]" tag from anywhere
+    private async checkCompletedTasks() {
+        const folderPath = this.settings.projectsFolderPath || '';
+        const folder = this.app.vault.getAbstractFileByPath(folderPath);
+        if (!folder) return;
+
+        const files = this.app.vault.getFiles().filter(f => f.path.startsWith(folderPath) && f.extension === 'md');
+
+        for (const file of files) {
+            const cache = this.app.metadataCache.getFileCache(file);
+            if (cache?.frontmatter) {
+                const fm = cache.frontmatter;
+                if (fm['googleTaskId'] && fm['status'] === 'active') {
+                    const taskId = fm['googleTaskId'];
+                    const remoteTask = await this.tasksClient.getTask(taskId);
+
+                    if (remoteTask && remoteTask.status === 'completed') {
+                        // Task is completed remotely, update local file
+                        await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+                            frontmatter['status'] = 'completed';
+                        });
+                        console.log(`Gemini Sync: Marked local task "${file.name}" as completed.`);
+                    }
+                }
+            }
+        }
+    }
+
+    private async processTask(task: TaskItem): Promise<boolean> {
+        // Parse Title: remove "[PROJET]" tag from anywhere in case it's still there
         const rawTitle = task.title.replace(/\[PROJET\]/gi, '').trim();
         // Sanitize filename
         const safeTitle = rawTitle.replace(/[\\/:*?"<>|]/g, '-');
@@ -75,7 +107,7 @@ export class ProjectManager {
         if (existingFile) {
             console.log(`Gemini Sync: File "${filePath}" already exists. Skipping creation to avoid overwrite.`);
             // Potentially we could append or update, but for now safe skip
-            return;
+            return false;
         }
 
         // Construct Content
@@ -87,30 +119,23 @@ export class ProjectManager {
             const folder = this.app.vault.getAbstractFileByPath(folderPath);
             if (!folder) {
                 await this.app.vault.createFolder(folderPath);
-                console.log(`Gemini Sync: Created projects folder at ${folderPath}`);
+                console.log(`Gemini Sync: Created tasks folder at ${folderPath}`);
             }
         }
 
         // Create File
         await this.app.vault.create(filePath, content);
-        console.log(`Gemini Sync: Created project note at ${filePath}`);
+        console.log(`Gemini Sync: Created task note at ${filePath}`);
+        return true;
     }
 
     private buildFrontmatter(task: TaskItem): string {
         const lines = ['---'];
 
-        // Tags
-        // Add specific project tag if configured or default #project? 
-        // User asked: "Tagging : Ajouter automatiquement le tag #task dans la note Obsidian créée"
-        // And "Tag précisé dans les settings" (wait, plan says "tags (configurés)")
-        // The plan says: `tags: [#task, #ton_tag_projet]`
-        // Since I didn't add a specific "Project Tag" setting in UI (I missed that detail in the simplified plan vs user query),
-        // I will stick to what the user prompt said: "Ajouter automatiquement le tag #task"
-        // And maybe a generic #project tag for now or just what is in settings?
-        // Let's add #task and #project.
         lines.push('tags:');
-        lines.push('  - task');
-        lines.push('  - project');
+        lines.push('  - tâche_venant_de_Google_Task');
+        lines.push(`googleTaskId: ${task.id}`);
+        lines.push(`status: active`);
 
         // Deadline
         if (task.due) {

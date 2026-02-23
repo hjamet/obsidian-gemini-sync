@@ -112,7 +112,7 @@ export default class GeminiSyncPlugin extends Plugin {
         this.driveClient = new DriveClient({
             clientId: this.settings.clientId,
             clientSecret: this.settings.clientSecret,
-            redirectUri: 'urn:ietf:wg:oauth:2.0:oob', // Manual copy-paste flow
+            redirectUri: 'http://127.0.0.1', // Localhost manual copy-paste flow
             refreshToken: this.settings.refreshToken,
             onTokenUpdate: async (token) => {
                 this.settings.refreshToken = token;
@@ -256,11 +256,11 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        containerEl.createEl('h3', { text: 'Project Sync Options' });
+        containerEl.createEl('h3', { text: 'Google Tasks Sync Options' });
 
         new Setting(containerEl)
             .setName('Enable Task Sync')
-            .setDesc('Create Project notes from Google Tasks starting with [PROJET].')
+            .setDesc('Create notes from active Google Tasks.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.enableTaskSync)
                 .onChange(async (value) => {
@@ -271,8 +271,8 @@ class GeminiSyncSettingTab extends PluginSettingTab {
 
         if (this.plugin.settings.enableTaskSync) {
             new Setting(containerEl)
-                .setName('Projects Folder')
-                .setDesc('Folder where new Project notes will be created.')
+                .setName('Tasks Folder')
+                .setDesc('Folder where new Task notes will be created.')
                 .addButton(button => button
                     .setButtonText(this.plugin.settings.projectsFolderPath || 'Select Folder')
                     .onClick(() => {
@@ -416,19 +416,28 @@ class GeminiSyncSettingTab extends PluginSettingTab {
 
         let authCode = '';
         new Setting(containerEl)
-            .setName('Step 2: Enter Auth Code')
-            .setDesc('Paste the code received from Google here.')
+            .setName('Step 2: Enter Auth Code (or URL)')
+            .setDesc('Paste the code or the full http://127.0.0.1 URL received from Google here.')
             .addText(text => text
-                .setPlaceholder('Paste code here')
+                .setPlaceholder('Paste code or URL here')
                 .onChange(async (value) => {
-                    authCode = value;
+                    authCode = value.trim();
+                    if (authCode.startsWith('http')) {
+                        try {
+                            const url = new URL(authCode);
+                            const extracted = url.searchParams.get('code');
+                            if (extracted) {
+                                authCode = extracted;
+                            }
+                        } catch (e) { }
+                    }
                 }))
             .addButton(button => button
                 .setButtonText('Authenticate')
                 .setCta()
                 .onClick(async () => {
                     if (!authCode) {
-                        new Notice('Please paste the code first.');
+                        new Notice('Please paste the code or URL first.');
                         return;
                     }
                     try {
