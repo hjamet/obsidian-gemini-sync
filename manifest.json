@@ -1,7 +1,7 @@
 {
     "id": "gemini-sync",
     "name": "Gemini Sync",
-    "version": "1.8.0",
+    "version": "1.8.1",
     "minAppVersion": "0.15.0",
     "description": "Strict unidirectional mirroring from Obsidian to Google Drive (Gemini compatible). Keeps Drive as an exact copy of your Vault.",
     "author": "Antigravity",

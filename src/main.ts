@@ -58,7 +58,8 @@ export default class GeminiSyncPlugin extends Plugin {
     statusBarItem: HTMLElement;
 
     async onload() {
-        console.log('Gemini Sync: Loading v1.8.0 with Canvas Support');
+        console.log('Gemini Sync: Loading v1.8.1 with Localhost Redirect');
+        new Notice('Gemini Sync v1.8.1 loaded with Localhost Redirect!');
         await this.loadSettings();
 
         this.initializeDriveClient();
