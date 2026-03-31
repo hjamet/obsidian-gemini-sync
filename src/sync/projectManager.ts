@@ -1,16 +1,19 @@
-import { App, TFile, normalizePath, Notice } from 'obsidian';
+import { App, TFile, normalizePath } from 'obsidian';
 import { TasksClient, TaskItem } from '../drive/tasksClient';
+import { Notifier } from '../notifications/notifier';
 import { GeminiSyncSettings } from '../main';
 
 export class ProjectManager {
     private app: App;
     private tasksClient: TasksClient;
     private settings: GeminiSyncSettings;
+    private notifier: Notifier;
 
-    constructor(app: App, tasksClient: TasksClient, settings: GeminiSyncSettings) {
+    constructor(app: App, tasksClient: TasksClient, settings: GeminiSyncSettings, notifier: Notifier) {
         this.app = app;
         this.tasksClient = tasksClient;
         this.settings = settings;
+        this.notifier = notifier;
     }
 
     updateSettings(settings: GeminiSyncSettings) {
@@ -35,34 +38,40 @@ export class ProjectManager {
                 return;
             }
 
-            console.log(`Gemini Sync: Found ${tasks.length} active tasks to import.`);
+            console.log(`Gemini Sync: Found ${tasks.length} active tasks potentially to import.`);
 
             let importedCount = 0;
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
 
             for (const task of tasks) {
                 try {
+                    // Filter by due date: skip if strictly in the future
+                    if (task.due) {
+                        const dueDate = new Date(task.due);
+                        if (dueDate > today) {
+                            console.log(`Gemini Sync: Skipping task "${task.title}" (due in future: ${task.due})`);
+                            continue;
+                        }
+                    }
+
                     const created = await this.processTask(task);
                     if (created) {
                         importedCount++;
-
-                        // 3. Ack task if configured
-                        if (this.settings.deleteTaskAfterSync) {
-                            await this.tasksClient.completeTask(task.id);
-                        }
                     }
                 } catch (taskError) {
                     console.error(`Gemini Sync: Failed to process task "${task.title}"`, taskError);
-                    new Notice(`Failed to import task: ${task.title}`);
+                    this.notifier.notify(`Failed to import task: ${task.title}`);
                 }
             }
 
             if (importedCount > 0) {
-                new Notice(`Gemini Sync: Imported ${importedCount} task(s) from Google Tasks.`);
+                this.notifier.notify(`Gemini Sync: Imported ${importedCount} task(s) from Google Tasks.`);
             }
 
         } catch (error) {
             console.error('Gemini Sync: Google Tasks Sync failed', error);
-            new Notice(`Google Tasks Sync failed: ${error.message}`);
+            this.notifier.notify(`Google Tasks Sync failed: ${error.message}`);
         }
     }
 
@@ -77,16 +86,32 @@ export class ProjectManager {
             const cache = this.app.metadataCache.getFileCache(file);
             if (cache?.frontmatter) {
                 const fm = cache.frontmatter;
-                if (fm['googleTaskId'] && fm['status'] === 'active') {
-                    const taskId = fm['googleTaskId'];
-                    const remoteTask = await this.tasksClient.getTask(taskId);
+                if (fm['g_task_id']) {
+                    const taskId = fm['g_task_id'];
+                    const status = fm['status'] || 'active'; // Default to active if missing
+                    const tags = fm['tags'] || [];
 
-                    if (remoteTask && remoteTask.status === 'completed') {
-                        // Task is completed remotely, update local file
-                        await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-                            frontmatter['status'] = 'completed';
-                        });
-                        console.log(`Gemini Sync: Marked local task "${file.name}" as completed.`);
+                    if (status === 'active') {
+                        const remoteTask = await this.tasksClient.getTask(taskId);
+                        if (remoteTask && remoteTask.status === 'completed') {
+                            // Task is completed remotely
+                            if (this.settings.deleteNoteOnTaskComplete) {
+                                await this.app.vault.trash(file, true);
+                                console.log(`Gemini Sync: Trashed local task note "${file.name}" (Sync G->O).`);
+                            } else {
+                                await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+                                    frontmatter['status'] = 'completed';
+                                });
+                                console.log(`Gemini Sync: Marked local task "${file.name}" as completed (Sync G->O).`);
+                            }
+                        }
+                    } else if (status === 'completed' || tags.includes('projet-fini')) {
+                        // Bidirectional: Obsidian -> Google
+                        const remoteTask = await this.tasksClient.getTask(taskId);
+                        if (remoteTask && remoteTask.status !== 'completed') {
+                            await this.tasksClient.completeTask(taskId);
+                            console.log(`Gemini Sync: Marked remote task for "${file.name}" as completed (Sync O->G).`);
+                        }
                     }
                 }
             }
@@ -94,10 +119,8 @@ export class ProjectManager {
     }
 
     private async processTask(task: TaskItem): Promise<boolean> {
-        // Parse Title: remove "[PROJET]" tag from anywhere in case it's still there
-        const rawTitle = task.title.replace(/\[PROJET\]/gi, '').trim();
-        // Sanitize filename
-        const safeTitle = rawTitle.replace(/[\\/:*?"<>|]/g, '-');
+        // Parse Title: clean spaces and sanitize filename
+        const safeTitle = task.title.trim().replace(/[\\/:*?"<>|]/g, '-');
 
         const folderPath = this.settings.projectsFolderPath || '';
         const filePath = normalizePath(`${folderPath}/${safeTitle}.md`);
@@ -135,21 +158,8 @@ export class ProjectManager {
         lines.push('tags:');
         lines.push('  - gtask');
         lines.push('  - project');
-        lines.push(`googleTaskId: ${task.id}`);
-        lines.push(`status: active`);
-
-        // Deadline
-        if (task.due) {
-            // task.due is RFC3339 usually (e.g. 2023-10-01T00:00:00.000Z)
-            // Obsidian typically likes YYYY-MM-DD for dates
-            try {
-                const date = new Date(task.due);
-                const dateStr = date.toISOString().split('T')[0];
-                lines.push(`deadline: ${dateStr}`);
-            } catch (e) {
-                console.warn('Invalid date format in task due date', task.due);
-            }
-        }
+        lines.push(`g_task_id: ${task.id}`);
+        lines.push('status: active');
 
         lines.push('---');
         return lines.join('\n');

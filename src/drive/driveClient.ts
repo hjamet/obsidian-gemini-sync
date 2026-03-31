@@ -1,6 +1,6 @@
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
-import { Notice } from 'obsidian';
+import { Notifier } from '../notifications/notifier';
 // Stream imports removed as we use Blob for Electron/Browser environment
 
 export interface DriveClientOptions {
@@ -9,6 +9,14 @@ export interface DriveClientOptions {
     redirectUri: string;
     refreshToken?: string;
     onTokenUpdate: (token: string) => Promise<void>;
+    notifier?: Notifier;
+}
+
+export interface DriveFileMetadata {
+    name?: string;
+    parents?: string[];
+    mimeType?: string;
+    trashed?: boolean;
 }
 
 export class DriveClient {
@@ -66,14 +74,14 @@ export class DriveClient {
 
             if (tokens.refresh_token) {
                 await this.options.onTokenUpdate(tokens.refresh_token);
-                new Notice('Gemini Sync: Successfully authenticated with Google Drive!');
+                this.options.notifier?.notify('Gemini Sync: Successfully authenticated with Google Drive!');
             } else {
                 console.warn('No refresh token received during authorization.');
-                new Notice('Gemini Sync: Authenticated, but no refresh token received. You may need to re-authorize.');
+                this.options.notifier?.notify('Gemini Sync: Authenticated, but no refresh token received. You may need to re-authorize.');
             }
         } catch (error) {
             console.error('Error retrieving access token', error);
-            new Notice('Gemini Sync: Authentication failed. Check console for details.');
+            this.options.notifier?.notify('Gemini Sync: Authentication failed. Check console for details.');
             throw error;
         }
     }
@@ -112,7 +120,7 @@ export class DriveClient {
      */
     async createFolder(name: string, parentId?: string): Promise<string> {
         const drive = this.getDrive();
-        const fileMetadata: any = {
+        const fileMetadata: DriveFileMetadata = {
             name: name,
             mimeType: 'application/vnd.google-apps.folder',
         };
@@ -133,7 +141,7 @@ export class DriveClient {
      * Uploads a file to Google Drive.
      * @returns The ID of the uploaded file.
      */
-    async uploadFile(name: string, content: any, mimeType: string, parentId?: string): Promise<string> {
+    async uploadFile(name: string, content: string | Buffer | Record<string, unknown>, mimeType: string, parentId?: string): Promise<string> {
         // Determine source and target MIME types
         const sourceMimeType = mimeType === 'application/vnd.google-apps.document' ? 'text/plain' : mimeType;
         const targetMimeType = mimeType === 'application/vnd.google-apps.document' ? 'application/vnd.google-apps.document' : undefined;
@@ -159,7 +167,7 @@ export class DriveClient {
     /**
      * Updates an existing file in Google Drive.
      */
-    async updateFile(fileId: string, content: any, mimeType: string): Promise<void> {
+    async updateFile(fileId: string, content: string | Buffer | Record<string, unknown>, mimeType: string): Promise<void> {
         // Determine source MIME type (no target conversion needed for updates usually, but we keep consistency)
         const sourceMimeType = mimeType === 'application/vnd.google-apps.document' ? 'text/plain' : mimeType;
 
@@ -231,7 +239,7 @@ export class DriveClient {
         return `gemini-sync-${Date.now()}-${rand}`;
     }
 
-    private async buildMultipartBody(boundary: string, metadata: any, blob: Blob, sourceMimeType: string): Promise<ArrayBuffer> {
+    private async buildMultipartBody(boundary: string, metadata: DriveFileMetadata, blob: Blob, sourceMimeType: string): Promise<ArrayBuffer> {
         const delimiter = `--${boundary}\r\n`;
         const closeDelimiter = `--${boundary}--`;
         const metadataJson = JSON.stringify(metadata);
@@ -257,7 +265,7 @@ export class DriveClient {
         const accessToken = tokenResponse.token;
         if (!accessToken) throw new Error('No access token available');
 
-        const metadata: any = { name };
+        const metadata: DriveFileMetadata = { name };
         if (parentId && parentId !== 'root') metadata.parents = [parentId];
         if (targetMimeType) metadata.mimeType = targetMimeType;
 
@@ -291,7 +299,7 @@ export class DriveClient {
         const accessToken = tokenResponse.token;
         if (!accessToken) throw new Error('No access token available');
 
-        const metadata: any = {};
+        const metadata: DriveFileMetadata = {};
         const boundary = this.buildMultipartBoundary();
         const body = await this.buildMultipartBody(boundary, metadata, blob, mimeType);
         const bodyBytes = new Uint8Array(body);
@@ -327,7 +335,7 @@ export class DriveClient {
                 const accessToken = tokenResponse.token;
                 if (!accessToken) throw new Error('No access token available');
 
-                const metadata: any = { name };
+                const metadata: DriveFileMetadata = { name };
                 if (parentId && parentId !== 'root') metadata.parents = [parentId];
                 if (targetMimeType) metadata.mimeType = targetMimeType;
 
@@ -374,9 +382,10 @@ export class DriveClient {
                 const result = await uploadRes.json();
                 return result.id;
 
-            } catch (error: any) {
+            } catch (error: unknown) {
+                const err = error as Error & { message?: string; code?: number; response?: { status: number } };
                 // Check for 410 Gone specifically
-                const is410 = error.message?.includes('410') || (error.code === 410) || (error.response?.status === 410);
+                const is410 = err.message?.includes('410') || (err.code === 410) || (err.response?.status === 410);
 
                 if (is410 && attempt < maxAttempts) {
                     console.warn(`Gemini Sync: Resumable upload session expired (410). Restarting session (attempt ${attempt + 1}/${maxAttempts})...`);
@@ -384,7 +393,7 @@ export class DriveClient {
                 }
 
                 // If not 410 or max attempts reached, rethrow
-                console.error('Manual Resumable Upload failed:', error);
+                console.error('Manual Resumable Upload failed:', err);
                 throw error;
             }
         }
@@ -447,9 +456,10 @@ export class DriveClient {
 
                 return; // Success
 
-            } catch (error: any) {
+            } catch (error: unknown) {
+                const err = error as Error & { message?: string; code?: number; response?: { status: number } };
                 // Check for 410 Gone specifically
-                const is410 = error.message?.includes('410') || (error.code === 410) || (error.response?.status === 410);
+                const is410 = err.message?.includes('410') || (err.code === 410) || (err.response?.status === 410);
 
                 if (is410 && attempt < maxAttempts) {
                     console.warn(`Gemini Sync: Resumable update session expired (410). Restarting session (attempt ${attempt + 1}/${maxAttempts})...`);
@@ -593,7 +603,7 @@ export class DriveClient {
 
         try {
             do {
-                const res: any = await drive.files.list({
+                const res = await drive.files.list({
                     q: `'${folderId}' in parents and trashed = false`,
                     fields: 'nextPageToken, files(id, name, modifiedTime, md5Checksum)',
                     spaces: 'drive',

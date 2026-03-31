@@ -1,4 +1,5 @@
-import { App, TFile, Notice, TFolder } from 'obsidian';
+import { App, TFile, TFolder } from 'obsidian';
+import { Notifier } from '../notifications/notifier';
 import { DriveClient } from '../drive/driveClient';
 import * as CryptoJS from 'crypto-js';
 import { GeminiSyncSettings } from '../main';
@@ -23,17 +24,19 @@ export class SyncManager {
     private rootFolderId: string | null = null;
     private folderIdCache: Map<string, string> = new Map();
     onSaveSettings: () => Promise<void>;
+    notifier: Notifier;
 
-    constructor(app: App, driveClient: DriveClient, settings: GeminiSyncSettings, statusBarItem: HTMLElement | undefined, onSaveSettings: () => Promise<void>) {
+    constructor(app: App, driveClient: DriveClient, settings: GeminiSyncSettings, statusBarItem: HTMLElement | undefined, onSaveSettings: () => Promise<void>, notifier: Notifier) {
         this.app = app;
         this.driveClient = driveClient;
         this.settings = settings;
         this.statusBarItem = statusBarItem || null;
         this.onSaveSettings = onSaveSettings;
+        this.notifier = notifier;
         this.manifestManager = new ManifestManager(driveClient);
 
         const tasksClient = new TasksClient(driveClient);
-        this.projectManager = new ProjectManager(app, tasksClient, settings);
+        this.projectManager = new ProjectManager(app, tasksClient, settings, notifier);
         this.canvasConverter = new CanvasConverter(app);
     }
 
@@ -50,20 +53,20 @@ export class SyncManager {
         this.driveClient = driveClient;
         this.manifestManager = new ManifestManager(driveClient);
         const tasksClient = new TasksClient(driveClient);
-        this.projectManager = new ProjectManager(this.app, tasksClient, this.settings);
+        this.projectManager = new ProjectManager(this.app, tasksClient, this.settings, this.notifier);
     }
 
     public cancelSync() {
         if (this.isSyncing) {
             this.cancelRequested = true;
             this.updateStatus('Gemini Sync: Cancelling...', undefined, false);
-            new Notice('Gemini Sync: Cancellation requested...');
+            this.notifier.notify('Gemini Sync: Cancellation requested...');
         }
     }
 
     public async forceResync() {
         if (this.isSyncing) {
-            new Notice('Sync in progress, please wait.');
+            this.notifier.notify('Sync in progress, please wait.');
             return;
         }
 
@@ -75,7 +78,7 @@ export class SyncManager {
 
             if (rootId) {
                 await this.driveClient.deleteFile(rootId, rootId);
-                new Notice('Remote folder deleted.');
+                this.notifier.notify('Remote folder deleted.');
             }
 
             this.rootFolderId = null;
@@ -88,7 +91,7 @@ export class SyncManager {
 
         } catch (e) {
             console.error('Force Resync failed:', e);
-            new Notice('Force Resync failed.');
+            this.notifier.notify('Force Resync failed.');
             this.isSyncing = false;
         }
     }
@@ -123,12 +126,12 @@ export class SyncManager {
 
     public async syncVault() {
         if (this.isSyncing) {
-            new Notice('Gemini Sync: Already in progress.');
+            this.notifier.notify('Gemini Sync: Already in progress.');
             return;
         }
 
         if (!this.driveClient.isReady()) {
-            new Notice('Gemini Sync: Not authenticated.');
+            this.notifier.notify('Gemini Sync: Not authenticated.');
             return;
         }
 
@@ -137,7 +140,7 @@ export class SyncManager {
         this.folderIdCache.clear();
 
         try {
-            new Notice('Gemini Sync: Starting strict mirror sync...');
+            this.notifier.notify('Gemini Sync: Starting strict mirror sync...');
             this.updateStatus('Gemini Sync: Initializing...', undefined, true);
 
             // 0. Sync Tasks from Google Tasks
@@ -241,7 +244,7 @@ export class SyncManager {
             let filesSinceLastSave = 0;
 
             if (filesToUpload.length === 0) {
-                new Notice('Gemini Sync: No changes so far.');
+                this.notifier.notify('Gemini Sync: No changes so far.');
             }
 
             for (const [folderPath, folderFiles] of filesByFolder) {
@@ -350,7 +353,7 @@ export class SyncManager {
 
                         } catch (err) {
                             console.error(`Failed to sync ${file.path}:`, err);
-                            new Notice(`Failed to sync ${file.path}`);
+                            this.notifier.notify(`Failed to sync ${file.path}`);
                         }
                     }));
                 }
@@ -388,10 +391,10 @@ export class SyncManager {
                 await this.manifestManager.saveManifest(rootId, remoteManifest);
                 await this.onSaveSettings();
 
-                new Notice('Gemini Sync: Mirroring complete!');
+                this.notifier.notify('Gemini Sync: Mirroring complete!');
                 this.updateStatus('Gemini Sync: Ready', 5000);
             } else {
-                new Notice('Gemini Sync: Cancelled.');
+                this.notifier.notify('Gemini Sync: Cancelled.');
                 this.updateStatus('Gemini Sync: Cancelled', 5000);
                 // Save progress even on cancel
                 await this.manifestManager.saveManifest(rootId, remoteManifest);
@@ -400,7 +403,7 @@ export class SyncManager {
 
         } catch (globalError) {
             console.error('Gemini Sync Fatal Error:', globalError);
-            new Notice('Gemini Sync Failed. See console.');
+            this.notifier.notify('Gemini Sync Failed. See console.');
             this.updateStatus('Gemini Sync: Failed', undefined);
         } finally {
             this.isSyncing = false;
@@ -580,7 +583,7 @@ export class SyncManager {
                 if (isInactive(status) || checks >= maxChecks) {
                     clearInterval(interval);
                     if (checks >= maxChecks) {
-                        new Notice('Gemini Sync: Timed out waiting for Obsidian Sync. Proceeding...');
+                        this.notifier.notify('Gemini Sync: Timed out waiting for Obsidian Sync. Proceeding...');
                         // console.log('Gemini Sync: Timed out waiting for Obsidian Sync.');
                     } else {
                         // console.log('Gemini Sync: Obsidian Sync finished.');

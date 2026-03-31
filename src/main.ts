@@ -1,6 +1,7 @@
 import { App, Plugin, PluginSettingTab, Setting, Notice, setIcon } from 'obsidian';
 import { DriveClient } from './drive/driveClient';
 import { SyncManager } from './sync/syncManager';
+import { ObsidianNotifier } from './notifications/obsidianNotifier';
 import { SetupWizardModal } from './ui/setupWizard';
 import { FolderSuggestModal } from './ui/folderSuggest';
 
@@ -30,7 +31,7 @@ export interface GeminiSyncSettings {
     // Project Sync Settings
     projectsFolderPath: string;
     enableTaskSync: boolean;
-    deleteTaskAfterSync: boolean;
+    deleteNoteOnTaskComplete: boolean;
 }
 
 const DEFAULT_SETTINGS: GeminiSyncSettings = {
@@ -47,7 +48,7 @@ const DEFAULT_SETTINGS: GeminiSyncSettings = {
     syncIndex: {},
     projectsFolderPath: 'Projects', // Default folder
     enableTaskSync: true,
-    deleteTaskAfterSync: true
+    deleteNoteOnTaskComplete: true
 }
 
 export default class GeminiSyncPlugin extends Plugin {
@@ -56,6 +57,7 @@ export default class GeminiSyncPlugin extends Plugin {
     syncManager: SyncManager;
     syncIntervalId: number | undefined;
     statusBarItem: HTMLElement;
+    notifier: ObsidianNotifier;
 
     async onload() {
         console.log('Gemini Sync: Loading v1.8.1 with Localhost Redirect');
@@ -67,7 +69,8 @@ export default class GeminiSyncPlugin extends Plugin {
         this.statusBarItem = this.addStatusBarItem();
         this.statusBarItem.setText('');
 
-        this.syncManager = new SyncManager(this.app, this.driveClient, this.settings, this.statusBarItem, () => this.saveSettings());
+        this.notifier = new ObsidianNotifier();
+        this.syncManager = new SyncManager(this.app, this.driveClient, this.settings, this.statusBarItem, () => this.saveSettings(), this.notifier);
 
         this.addSettingTab(new GeminiSyncSettingTab(this.app, this));
 
@@ -118,7 +121,8 @@ export default class GeminiSyncPlugin extends Plugin {
             onTokenUpdate: async (token) => {
                 this.settings.refreshToken = token;
                 await this.saveSettings();
-            }
+            },
+            notifier: this.notifier
         });
 
         if (this.syncManager) {
@@ -285,12 +289,12 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     }));
 
             new Setting(containerEl)
-                .setName('Complete Tasks After Sync')
-                .setDesc('Mark tasks as completed in Google Tasks after creating the note.')
+                .setName('Delete Note on Completion')
+                .setDesc('When a task is marked as Done in Google Tasks, delete the corresponding Obsidian note from the vault.')
                 .addToggle(toggle => toggle
-                    .setValue(this.plugin.settings.deleteTaskAfterSync)
+                    .setValue(this.plugin.settings.deleteNoteOnTaskComplete)
                     .onChange(async (value) => {
-                        this.plugin.settings.deleteTaskAfterSync = value;
+                        this.plugin.settings.deleteNoteOnTaskComplete = value;
                         await this.plugin.saveSettings();
                     }));
         }

@@ -1,5 +1,7 @@
-export function convertToGoogleDocs(markdown: string): any[] {
-    const requests: any[] = [];
+import { docs_v1 } from 'googleapis';
+
+export function convertToGoogleDocs(markdown: string): docs_v1.Schema$Request[] {
+    const requests: docs_v1.Schema$Request[] = [];
     let index = 1; // Google Docs starts at index 1
 
     // Normalize newlines to avoid index drift on Windows (CRLF -> LF)
