@@ -32,6 +32,7 @@ export interface GeminiSyncSettings {
     projectsFolderPath: string;
     enableTaskSync: boolean;
     deleteNoteOnTaskComplete: boolean;
+    completionTag: string;
 }
 
 const DEFAULT_SETTINGS: GeminiSyncSettings = {
@@ -48,7 +49,8 @@ const DEFAULT_SETTINGS: GeminiSyncSettings = {
     syncIndex: {},
     projectsFolderPath: 'Projects', // Default folder
     enableTaskSync: true,
-    deleteNoteOnTaskComplete: true
+    deleteNoteOnTaskComplete: true,
+    completionTag: 'projet-fini'
 }
 
 export default class GeminiSyncPlugin extends Plugin {
@@ -295,6 +297,17 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.deleteNoteOnTaskComplete)
                     .onChange(async (value) => {
                         this.plugin.settings.deleteNoteOnTaskComplete = value;
+                        await this.plugin.saveSettings();
+                    }));
+
+            new Setting(containerEl)
+                .setName('Completion Tag')
+                .setDesc('Tag that indicates a project is completed locally (e.g. projet-fini). Do not include the #.')
+                .addText(text => text
+                    .setPlaceholder('projet-fini')
+                    .setValue(this.plugin.settings.completionTag)
+                    .onChange(async (value) => {
+                        this.plugin.settings.completionTag = value;
                         await this.plugin.saveSettings();
                     }));
         }

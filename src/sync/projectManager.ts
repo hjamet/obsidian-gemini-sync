@@ -105,7 +105,7 @@ export class ProjectManager {
                                 console.log(`Gemini Sync: Marked local task "${file.name}" as completed (Sync G->O).`);
                             }
                         }
-                    } else if (status === 'completed' || tags.includes('projet-fini')) {
+                    } else if (status === 'completed' || tags.includes(this.settings.completionTag || 'projet-fini')) {
                         // Bidirectional: Obsidian -> Google
                         const remoteTask = await this.tasksClient.getTask(taskId);
                         if (remoteTask && remoteTask.status !== 'completed') {

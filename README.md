@@ -151,7 +151,7 @@ To use this plugin, you need to configure a Google Cloud project and create OAut
    - La note contient la description et un frontmatter avec `g_task_id`.
    - **Bidirectionnalité** :
      - Si vous marquez la tâche comme terminée dans Google Tasks, la note Obsidian est **supprimée** (mise à la corbeille) par défaut, ou son statut passe à `completed`.
-     - Si vous passez le statut de la note à `completed` ou ajoutez le tag `#projet-fini` dans Obsidian, la tâche est marquée comme terminée dans Google Tasks.
+     - Si vous passez le statut de la note à `completed` ou ajoutez le tag configuré (par défaut `#projet-fini`) dans Obsidian, la tâche est marquée comme terminée dans Google Tasks.
      - Les tâches sont importées sans filtre `[PROJET]`.
 
 ## Important Files
@@ -327,12 +327,14 @@ The plugin maintains a mapping between local paths and Google Drive file IDs to:
 | [Refonte Google Tasks Sync](docs/tasks/google-tasks-sync-refactor.md) | Spécification de la refonte de la synchronisation Google Tasks (bidirectionnalité, import différé, suppression du mode destructif) |
 | [Nettoyage TypeScript (Types Any)](docs/tasks/remove-any-types.md) | Réduction de la dette technique en remplaçant les types `any` par des types stricts dans l'infrastructure |
 | [Découplage Notifications UI](docs/tasks/decouple-ui-notifications.md) | Retrait des `new Notice()` des couches basses et introduction d'un mécanisme de notification découplé |
+| [Tag de Complétion Configurable](docs/tasks/configurable-completion-tag.md) | Ajout du paramètre `completionTag` pour découpler la détection de tâche terminée (compatibilité ProjectMemory) |
 
 ## Roadmap
 
 - [x] [Refonte Google Tasks Sync](docs/tasks/google-tasks-sync-refactor.md) — Synchronisation bidirectionnelle du statut, import conditionnel par `due` date, suppression de `deleteTaskAfterSync`
 - [x] [Nettoyage TypeScript (Types Any)](docs/tasks/remove-any-types.md) — Fiabilisation du client Drive et du convertisseur avec typage strict
 - [x] [Découplage Notifications UI](docs/tasks/decouple-ui-notifications.md) — Retrait des `new Notice()` des couches d'infrastructure pour respecter la séparation des préoccupations
+- [x] [Tag de Complétion Configurable](docs/tasks/configurable-completion-tag.md) — Paramétrage du tag de terminaison pour intégration inter-plugins.
 
 ## Changelog
 
