@@ -41,19 +41,8 @@ export class ProjectManager {
             console.log(`Gemini Sync: Found ${tasks.length} active tasks potentially to import.`);
 
             let importedCount = 0;
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
-
             for (const task of tasks) {
                 try {
-                    // Filter by due date: skip if strictly in the future
-                    if (task.due) {
-                        const dueDate = new Date(task.due);
-                        if (dueDate > today) {
-                            console.log(`Gemini Sync: Skipping task "${task.title}" (due in future: ${task.due})`);
-                            continue;
-                        }
-                    }
 
                     const created = await this.processTask(task);
                     if (created) {
@@ -160,6 +149,11 @@ export class ProjectManager {
         lines.push('  - project');
         lines.push(`g_task_id: ${task.id}`);
         lines.push('status: active');
+
+        if (task.due) {
+            const dateOnly = task.due.split('T')[0];
+            lines.push(`due: "${dateOnly}"`);
+        }
 
         lines.push('---');
         return lines.join('\n');

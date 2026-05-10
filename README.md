@@ -139,16 +139,16 @@ To use this plugin, you need to configure a Google Cloud project and create OAut
    - Copy the authorization code provided by Google.
    - Paste it in the **"Auth Code"** field of the plugin and validate.
 3. (Optional) Configure the **Remote Folder** if you want your files to be in a specific subfolder of your Drive.
-4. (Optional) Enable **Project Sync** to automatically import tasks from your default Google Tasks list as new notes. Taks with a due date in the future are ignored until their date is reached.
+4. (Optional) Enable **Project Sync** to automatically import tasks from your default Google Tasks list as new notes. All tasks are imported regardless of their due date to allow global anticipation.
 
 ### Using Project Memory Bridge
 
 1. **Création d'une tâche** : Dans Google Tasks, ajoutez une tâche à votre liste par défaut.
-2. **Ajout de détails** : Ajoutez une description (notes) et éventuellement une date d'échéance (aujourd'hui ou dans le passé pour un import immédiat).
+2. **Ajout de détails** : Ajoutez une description (notes) et éventuellement une date d'échéance (passée, présente ou future).
 3. **Synchronisation** : Lancez "Sync Now" dans Obsidian.
 4. **Résultat** :
    - Une nouvelle note est créée dans votre dossier de projets configuré.
-   - La note contient la description et un frontmatter avec `g_task_id`.
+   - La note contient la description et un frontmatter avec `g_task_id` et `due` (date d'échéance).
    - **Bidirectionnalité** :
      - Si vous marquez la tâche comme terminée dans Google Tasks, la note Obsidian est **supprimée** (mise à la corbeille) par défaut, ou son statut passe à `completed`.
      - Si vous passez le statut de la note à `completed` ou ajoutez le tag configuré (par défaut `#projet-fini`) dans Obsidian, la tâche est marquée comme terminée dans Google Tasks.
