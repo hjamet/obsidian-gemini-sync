@@ -1,0 +1,66 @@
+name: Release Plugin
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - manifest.json
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get version from manifest
+        id: version
+        run: |
+          VERSION=$(jq -r .version manifest.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "refs/tags/${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Node.js
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        if: steps.check_tag.outputs.exists == 'false'
+        run: npm ci
+
+      - name: Build plugin
+        if: steps.check_tag.outputs.exists == 'false'
+        run: npm run build
+
+      - name: Create Release
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+
+          if [ -f "styles.css" ]; then
+            FILES="manifest.json main.js styles.css"
+          else
+            FILES="manifest.json main.js"
+          fi
+
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --notes "Release $VERSION" \
+            $FILES

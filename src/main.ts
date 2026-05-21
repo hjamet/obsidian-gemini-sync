@@ -107,9 +107,11 @@ export default class GeminiSyncPlugin extends Plugin {
 
         // Trigger sync on startup if enabled
         if (this.settings.syncOnStartup) {
-            this.app.workspace.onLayoutReady(async () => {
-                // console.log('Gemini Sync: Triggering startup sync...');
-                await this.syncManager.syncVault();
+            this.app.workspace.onLayoutReady(() => {
+                // console.log('Gemini Sync: Triggering startup sync with delay...');
+                setTimeout(async () => {
+                    await this.syncManager.syncVault();
+                }, 5000);
             });
         }
     }
