@@ -1,6 +1,6 @@
 {
     "name": "gemini-sync",
-    "version": "2.0.3",
+    "version": "2.0.4",
     "description": "Synchronisation unidirectionnelle Obsidian vers Google Drive avec conversion GDocs.",
     "main": "main.js",
     "scripts": {
