@@ -2,6 +2,7 @@ import { App, TFile, normalizePath } from 'obsidian';
 import { TasksClient, TaskItem } from '../drive/tasksClient';
 import { Notifier } from '../notifications/notifier';
 import { GeminiSyncSettings } from '../main';
+import { pLimit } from './concurrency';
 
 export class ProjectManager {
     private app: App;
@@ -71,7 +72,8 @@ export class ProjectManager {
 
         const files = this.app.vault.getFiles().filter(f => f.path.startsWith(folderPath) && f.extension === 'md');
 
-        for (const file of files) {
+        const limit = pLimit(5);
+        const promises = files.map(file => limit(async () => {
             const cache = this.app.metadataCache.getFileCache(file);
             if (cache?.frontmatter) {
                 const fm = cache.frontmatter;
@@ -104,7 +106,9 @@ export class ProjectManager {
                     }
                 }
             }
-        }
+        }));
+
+        await Promise.all(promises);
     }
 
     private async processTask(task: TaskItem): Promise<boolean> {

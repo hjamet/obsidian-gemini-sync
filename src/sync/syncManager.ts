@@ -196,7 +196,16 @@ export class SyncManager {
                     await yieldToEventLoop();
                 }
 
-                // OPTIMIZATION: Check mtime to skip re-hashing
+                const remoteEntry = remoteManifest!.files[file.path];
+
+                // If it doesn't exist on remote, it definitely needs upload.
+                // We don't need to compute its hash now; uploadFile will compute it.
+                if (!remoteEntry) {
+                    filesToUpload.push(file);
+                    continue;
+                }
+
+                // If it exists on remote, check if we can use cached hash
                 let localHash: string;
                 const cachedEntry = this.settings.syncIndex[file.path];
 
@@ -208,11 +217,9 @@ export class SyncManager {
                     localHash = await this.calculateFileHash(file);
                 }
 
-                const remoteEntry = remoteManifest!.files[file.path];
-
                 // If remote exists and hash matches, SKIP upload & API calls
-                if (remoteEntry && remoteEntry.hash === localHash) {
-                    // Update usage index (cache)
+                if (remoteEntry.hash === localHash) {
+                    // Update usage index (cache) if needed
                     if (!this.settings.syncIndex[file.path] || this.settings.syncIndex[file.path].lastModified !== file.stat.mtime) {
                         this.settings.syncIndex[file.path] = {
                             path: file.path,
@@ -224,7 +231,6 @@ export class SyncManager {
                     keptRemotePaths.add(file.path);
                     processedCount++; // Validated as "synced" (no-op)
                 } else {
-                    // Needs upload or check
                     filesToUpload.push(file);
                 }
             }
@@ -410,9 +416,18 @@ export class SyncManager {
         }
     }
 
+    private calculateHashFromContent(content: string | ArrayBuffer | Buffer): string {
+        if (typeof content === 'string') {
+            return CryptoJS.MD5(content).toString();
+        } else {
+            const word = CryptoJS.lib.WordArray.create(content as any);
+            return CryptoJS.MD5(word).toString();
+        }
+    }
+
     private async uploadFile(file: TFile, rootId: string, manifest: RemoteManifest) {
         const content = await this.getFileContent(file);
-        const hash = await this.calculateFileHash(file);
+        const hash = this.calculateHashFromContent(content);
 
         let mimeType = 'application/octet-stream';
         if (file.extension === 'md' || file.extension === 'canvas') mimeType = 'application/vnd.google-apps.document';
