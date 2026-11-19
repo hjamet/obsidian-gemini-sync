@@ -1,15 +1,32 @@
-import { App, TFile, TFolder } from 'obsidian';
+import { App, TFile } from 'obsidian';
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { Notifier } from '../notifications/notifier';
-import { DriveClient } from '../drive/driveClient';
-import * as CryptoJS from 'crypto-js';
+import { DriveClient, DriveHttpError } from '../drive/driveClient';
 import { GeminiSyncSettings } from '../main';
-import { ManifestManager, RemoteEntry, RemoteManifest } from './remoteManifest';
+import { ManifestManager, RemoteManifest } from './remoteManifest';
 import { pLimit } from './concurrency';
 import { TasksClient } from '../drive/tasksClient';
 import { ProjectManager } from './projectManager';
 import { CanvasConverter } from '../convert/canvasConverter';
+import { LocalSyncCache } from './localCache';
 
 const yieldToEventLoop = () => new Promise(resolve => setTimeout(resolve, 0));
+
+const HARD_EXCLUDED_PREFIXES = [
+    '.obsidian/',
+    '_agents/doc_version_cas/'
+];
+
+function appendSyncAuditEvent(payload: Record<string, unknown>): void {
+    try {
+        const logPath = path.join(os.tmpdir(), 'obsidian-sync-audit.jsonl');
+        const line = JSON.stringify({ ts: new Date().toISOString(), plugin: 'gemini-sync', ...payload }) + '\n';
+        fs.appendFile(logPath, line, 'utf8', () => {});
+    } catch (_) {}
+}
 
 export class SyncManager {
     app: App;
@@ -21,18 +38,37 @@ export class SyncManager {
     manifestManager: ManifestManager;
     projectManager: ProjectManager;
     canvasConverter: CanvasConverter;
+    localCache: LocalSyncCache;
     private rootFolderId: string | null = null;
     private folderIdCache: Map<string, string> = new Map();
+    private activeManifest: RemoteManifest | null = null;
+    private manifestLoadInFlight: Promise<RemoteManifest> | null = null;
+    private manifestDirty: boolean = false;
+    private manifestSaveTimer: ReturnType<typeof setTimeout> | null = null;
+    private watchTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+    private pendingWatchPaths: Set<string> = new Set();
+    private pendingDeletePaths: Set<string> = new Set();
+    private deleteFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    private singleFileLimit = pLimit(2);
     onSaveSettings: () => Promise<void>;
     notifier: Notifier;
 
-    constructor(app: App, driveClient: DriveClient, settings: GeminiSyncSettings, statusBarItem: HTMLElement | undefined, onSaveSettings: () => Promise<void>, notifier: Notifier) {
+    constructor(
+        app: App,
+        driveClient: DriveClient,
+        settings: GeminiSyncSettings,
+        statusBarItem: HTMLElement | undefined,
+        onSaveSettings: () => Promise<void>,
+        notifier: Notifier,
+        localCache: LocalSyncCache
+    ) {
         this.app = app;
         this.driveClient = driveClient;
         this.settings = settings;
         this.statusBarItem = statusBarItem || null;
         this.onSaveSettings = onSaveSettings;
         this.notifier = notifier;
+        this.localCache = localCache;
         this.manifestManager = new ManifestManager(driveClient);
 
         const tasksClient = new TasksClient(driveClient);
@@ -44,6 +80,8 @@ export class SyncManager {
         if (this.settings.remoteFolderPath !== settings.remoteFolderPath) {
             this.rootFolderId = null;
             this.folderIdCache.clear();
+            this.activeManifest = null;
+            this.manifestManager.reset();
         }
         this.settings = settings;
         this.projectManager.updateSettings(settings);
@@ -52,8 +90,304 @@ export class SyncManager {
     public updateDriveClient(driveClient: DriveClient) {
         this.driveClient = driveClient;
         this.manifestManager = new ManifestManager(driveClient);
+        this.activeManifest = null;
         const tasksClient = new TasksClient(driveClient);
         this.projectManager = new ProjectManager(this.app, tasksClient, this.settings, this.notifier);
+    }
+
+    public dispose(): void {
+        for (const timer of this.watchTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.watchTimers.clear();
+        if (this.manifestSaveTimer) {
+            clearTimeout(this.manifestSaveTimer);
+            this.manifestSaveTimer = null;
+        }
+        if (this.deleteFlushTimer) {
+            clearTimeout(this.deleteFlushTimer);
+            this.deleteFlushTimer = null;
+        }
+        this.localCache.flushSync();
+    }
+
+    public shouldSyncPath(filePath: string, extension?: string): boolean {
+        const norm = filePath.replace(/\\/g, '/');
+        for (const prefix of HARD_EXCLUDED_PREFIXES) {
+            if (norm.startsWith(prefix)) return false;
+        }
+        const excludedFolders = this.settings.excludedFolders || [];
+        if (excludedFolders.some(ex => ex && (norm === ex || norm.startsWith(ex + '/')))) {
+            return false;
+        }
+        const ext = (extension ?? (norm.includes('.') ? norm.split('.').pop() || '' : '')).toLowerCase();
+        if (ext === 'md') return true;
+        if (ext === 'pdf') return this.settings.syncPDFs;
+        if (ext === 'canvas') return this.settings.syncCanvas;
+        if (['png', 'jpg', 'jpeg', 'gif'].includes(ext)) return this.settings.syncImages;
+        return false;
+    }
+
+    /**
+     * Ultra-light per-file watchdog: resets a 60s debounce timer for the modified note
+     * and pushes ONLY that single file with one PATCH/POST request.
+     */
+    public scheduleFileSync(file: TFile): void {
+        if (!this.settings.enableWatchdog) return;
+        if (!this.driveClient.isReady()) return;
+        if (!this.shouldSyncPath(file.path, file.extension)) return;
+
+        const existingTimer = this.watchTimers.get(file.path);
+        if (existingTimer) {
+            clearTimeout(existingTimer);
+        }
+
+        const delayMs = Math.max(5, this.settings.watchDebounceSeconds || 60) * 1000;
+        const filePath = file.path;
+        const timer = setTimeout(() => {
+            this.watchTimers.delete(filePath);
+            if (this.isSyncing) {
+                this.pendingWatchPaths.add(filePath);
+                return;
+            }
+            void this.singleFileLimit(() => this.pushSingleFileByPath(filePath));
+        }, delayMs);
+
+        this.watchTimers.set(filePath, timer);
+    }
+
+    /**
+     * Handles file renames/moves via lightweight Drive metadata PATCH instead of delete+reupload.
+     */
+    public async handleFileRename(file: TFile, oldPath: string): Promise<void> {
+        if (!this.settings.enableWatchdog || !this.driveClient.isReady()) return;
+
+        // Cancel pending timer on old path
+        const oldTimer = this.watchTimers.get(oldPath);
+        if (oldTimer) {
+            clearTimeout(oldTimer);
+            this.watchTimers.delete(oldPath);
+        }
+
+        const shouldNowSync = this.shouldSyncPath(file.path, file.extension);
+        const cachedOld = this.localCache.get(oldPath);
+
+        if (!shouldNowSync) {
+            if (cachedOld) {
+                this.scheduleFileDelete(oldPath);
+            }
+            return;
+        }
+
+        if (!cachedOld?.driveId) {
+            this.scheduleFileSync(file);
+            return;
+        }
+
+        try {
+            const t0 = Date.now();
+            const manifest = await this.ensureActiveManifest();
+            const oldParentPath = oldPath.includes('/') ? oldPath.slice(0, oldPath.lastIndexOf('/')) : '';
+            const newParentPath = file.parent?.path || '';
+            const isDocType = file.extension === 'md' || file.extension === 'canvas';
+            const newRemoteName = isDocType ? file.basename : file.name;
+
+            let newParentId: string | undefined;
+            let oldParentId: string | undefined;
+            if (oldParentPath !== newParentPath) {
+                newParentId = await this.ensureFolderStructure(newParentPath);
+                oldParentId = await this.ensureFolderStructure(oldParentPath);
+            }
+
+            await this.driveClient.renameOrMoveFile(cachedOld.driveId, newRemoteName, newParentId, oldParentId);
+
+            // Migrate cache & manifest entries
+            const movedEntry = {
+                path: file.path,
+                driveId: cachedOld.driveId,
+                hash: cachedOld.hash,
+                lastModified: file.stat.mtime
+            };
+            this.localCache.delete(oldPath);
+            this.localCache.set(movedEntry);
+            this.localCache.scheduleFlush();
+
+            delete manifest.files[oldPath];
+            manifest.files[file.path] = {
+                path: file.path,
+                driveId: cachedOld.driveId,
+                hash: cachedOld.hash,
+                modifiedTime: Date.now()
+            };
+            this.scheduleManifestSave();
+            appendSyncAuditEvent({ event: 'watchdogRename', oldPath, newPath: file.path, durationMs: Date.now() - t0 });
+        } catch (err) {
+            console.warn(`Gemini Sync: Fast rename failed for ${oldPath} -> ${file.path}, scheduling fallback sync`, err);
+            this.localCache.delete(oldPath);
+            this.scheduleFileSync(file);
+        }
+    }
+
+    /**
+     * Debounces file deletions before trashing on Drive.
+     */
+    public scheduleFileDelete(filePath: string): void {
+        if (!this.settings.enableWatchdog || !this.driveClient.isReady()) return;
+
+        const pendingTimer = this.watchTimers.get(filePath);
+        if (pendingTimer) {
+            clearTimeout(pendingTimer);
+            this.watchTimers.delete(filePath);
+        }
+
+        if (!this.localCache.get(filePath) && !this.activeManifest?.files[filePath]) {
+            return;
+        }
+
+        this.pendingDeletePaths.add(filePath);
+        if (this.deleteFlushTimer) clearTimeout(this.deleteFlushTimer);
+        this.deleteFlushTimer = setTimeout(() => {
+            this.deleteFlushTimer = null;
+            void this.flushPendingDeletes();
+        }, 10000);
+    }
+
+    private async flushPendingDeletes(): Promise<void> {
+        if (this.isSyncing || this.pendingDeletePaths.size === 0) return;
+        const paths = Array.from(this.pendingDeletePaths);
+        this.pendingDeletePaths.clear();
+
+        try {
+            const rootId = await this.getVaultRoot();
+            const manifest = await this.ensureActiveManifest();
+            let deletedCount = 0;
+
+            for (const filePath of paths) {
+                if (this.app.vault.getAbstractFileByPath(filePath)) continue; // recreated in the meantime
+                const driveId = manifest.files[filePath]?.driveId || this.localCache.get(filePath)?.driveId;
+                if (driveId) {
+                    await this.driveClient.deleteFile(driveId, rootId);
+                    deletedCount++;
+                }
+                delete manifest.files[filePath];
+                this.localCache.delete(filePath);
+            }
+
+            if (deletedCount > 0) {
+                this.localCache.scheduleFlush();
+                this.scheduleManifestSave();
+                appendSyncAuditEvent({ event: 'watchdogDelete', deletedCount });
+            }
+        } catch (err) {
+            console.error('Gemini Sync: Failed flushing watchdog deletes:', err);
+        }
+    }
+
+    private async pushSingleFileByPath(filePath: string): Promise<void> {
+        const abstract = this.app.vault.getAbstractFileByPath(filePath);
+        if (!(abstract instanceof TFile)) return;
+        if (!this.shouldSyncPath(abstract.path, abstract.extension)) return;
+
+        const t0 = Date.now();
+        try {
+            const content = await this.getFileContent(abstract);
+            const hash = this.calculateHashFromContent(content);
+            const cached = this.localCache.get(abstract.path);
+
+            // Fast no-op exit when file was touched without changing content
+            if (cached && cached.hash === hash) {
+                if (cached.lastModified !== abstract.stat.mtime) {
+                    this.localCache.set({
+                        path: abstract.path,
+                        driveId: cached.driveId,
+                        hash,
+                        lastModified: abstract.stat.mtime
+                    });
+                    this.localCache.scheduleFlush();
+                }
+                return;
+            }
+
+            const mimeType = this.getMimeTypeForFile(abstract);
+            let driveId = cached?.driveId || this.activeManifest?.files[abstract.path]?.driveId || null;
+            let action: 'patch' | 'create' = 'patch';
+
+            if (driveId) {
+                try {
+                    await this.driveClient.updateFile(driveId, content, mimeType);
+                } catch (err: any) {
+                    if (err instanceof DriveHttpError && err.status === 404) {
+                        driveId = null; // deleted remotely -> recreate
+                    } else {
+                        throw err;
+                    }
+                }
+            }
+
+            if (!driveId) {
+                action = 'create';
+                const parentId = await this.ensureFolderStructure(abstract.parent?.path || '');
+                const remoteName = (abstract.extension === 'md' || abstract.extension === 'canvas') ? abstract.basename : abstract.name;
+                driveId = await this.driveClient.uploadFile(remoteName, content, mimeType, parentId);
+            }
+
+            this.localCache.set({
+                path: abstract.path,
+                driveId,
+                hash,
+                lastModified: abstract.stat.mtime
+            });
+            this.localCache.scheduleFlush();
+
+            const manifest = await this.ensureActiveManifest();
+            manifest.files[abstract.path] = {
+                path: abstract.path,
+                driveId,
+                hash,
+                modifiedTime: Date.now()
+            };
+            this.scheduleManifestSave();
+
+            const durationMs = Date.now() - t0;
+            this.updateStatus(`Gemini Sync: ↑ ${abstract.basename}`, 4000, false);
+            appendSyncAuditEvent({ event: 'watchdogPush', action, path: abstract.path, durationMs });
+        } catch (err: any) {
+            console.error(`Gemini Sync Watchdog failed for ${filePath}:`, err);
+            appendSyncAuditEvent({ event: 'watchdogError', path: filePath, error: String(err?.message || err).slice(0, 180) });
+        }
+    }
+
+    private async ensureActiveManifest(): Promise<RemoteManifest> {
+        if (this.activeManifest) return this.activeManifest;
+        if (this.manifestLoadInFlight) return this.manifestLoadInFlight;
+
+        this.manifestLoadInFlight = (async () => {
+            const rootId = await this.getVaultRoot();
+            const { manifest } = await this.manifestManager.loadManifest(rootId);
+            this.activeManifest = manifest || this.manifestManager.createEmptyManifest();
+            return this.activeManifest;
+        })().finally(() => {
+            this.manifestLoadInFlight = null;
+        });
+
+        return this.manifestLoadInFlight;
+    }
+
+    private scheduleManifestSave(): void {
+        this.manifestDirty = true;
+        if (this.manifestSaveTimer) clearTimeout(this.manifestSaveTimer);
+        this.manifestSaveTimer = setTimeout(async () => {
+            this.manifestSaveTimer = null;
+            if (!this.manifestDirty || this.isSyncing || !this.activeManifest) return;
+            try {
+                const rootId = await this.getVaultRoot();
+                this.activeManifest.lastSync = Date.now();
+                await this.manifestManager.saveManifest(rootId, this.activeManifest);
+                this.manifestDirty = false;
+            } catch (err) {
+                console.error('Gemini Sync: Failed saving debounced manifest:', err);
+            }
+        }, 15000);
     }
 
     public cancelSync() {
@@ -83,12 +417,14 @@ export class SyncManager {
 
             this.rootFolderId = null;
             this.folderIdCache.clear();
+            this.activeManifest = null;
+            this.manifestManager.reset();
+            this.localCache.clear();
             this.settings.syncIndex = {};
             await this.onSaveSettings();
 
             this.isSyncing = false;
-            await this.syncVault();
-
+            await this.syncVault({ silent: false });
         } catch (e) {
             console.error('Force Resync failed:', e);
             this.notifier.notify('Force Resync failed.');
@@ -99,14 +435,14 @@ export class SyncManager {
     private updateStatus(message: string, timeout?: number, showCancel: boolean = false) {
         if (this.statusBarItem) {
             this.statusBarItem.empty();
-            const msgSpan = this.statusBarItem.createEl('span', { text: message });
+            this.statusBarItem.createEl('span', { text: message });
 
             if (showCancel) {
                 const btn = this.statusBarItem.createEl('span', { cls: 'status-bar-item-segment' });
                 btn.style.marginLeft = '10px';
                 btn.style.cursor = 'pointer';
                 btn.style.color = 'var(--text-error)';
-                btn.setText("Cancel");
+                btn.setText('Cancel');
                 btn.onclick = (e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -124,23 +460,31 @@ export class SyncManager {
         }
     }
 
-    public async syncVault() {
+    public async syncVault(options: { silent?: boolean } = {}) {
+        const silent = Boolean(options.silent);
         if (this.isSyncing) {
-            this.notifier.notify('Gemini Sync: Already in progress.');
+            if (!silent) this.notifier.notify('Gemini Sync: Already in progress.');
             return;
         }
 
         if (!this.driveClient.isReady()) {
-            this.notifier.notify('Gemini Sync: Not authenticated.');
+            if (!silent) this.notifier.notify('Gemini Sync: Not authenticated.');
             return;
         }
 
+        const startedAt = Date.now();
         this.isSyncing = true;
         this.cancelRequested = false;
         this.folderIdCache.clear();
 
+        let uploadedCount = 0;
+        let recoveredCount = 0;
+        let deletedCount = 0;
+        let deduplicatedManifests = 0;
+        let manifestSaved = false;
+
         try {
-            this.notifier.notify('Gemini Sync: Starting strict mirror sync...');
+            if (!silent) this.notifier.notify('Gemini Sync: Starting strict mirror sync...');
             this.updateStatus('Gemini Sync: Initializing...', undefined, true);
 
             // 0. Sync Tasks from Google Tasks
@@ -151,91 +495,65 @@ export class SyncManager {
 
             const rootId = await this.getVaultRoot();
 
-            // 1. Charger le Manifeste Distant (État actuel du Drive)
-            let remoteManifest = await this.manifestManager.loadManifest(rootId);
-            if (!remoteManifest) {
-                remoteManifest = this.manifestManager.createEmptyManifest();
-            }
+            // 1. Load & automatically deduplicate remote manifest
+            const loadRes = await this.manifestManager.loadManifest(rootId);
+            deduplicatedManifests = loadRes.deduplicatedCount;
+            const remoteManifest = loadRes.manifest || this.manifestManager.createEmptyManifest();
+            this.activeManifest = remoteManifest;
 
-            // 2. Préparer la liste des fichiers locaux (Source de Vérité)
+            let isManifestDirty = !loadRes.manifest;
+
+            // 2. Filter eligible local files
             const localFiles = this.app.vault.getFiles();
             const excludedFolders = this.settings.excludedFolders || [];
-
-            // Filtrer les fichiers exclus
-            const filesToSync = localFiles.filter(file => {
-                if (excludedFolders.some(ex => file.path === ex || file.path.startsWith(ex + '/'))) return false;
-                if (file.extension === 'md') return true;
-                if (file.extension === 'pdf') return this.settings.syncPDFs;
-                if (file.extension === 'canvas') return this.settings.syncCanvas;
-                if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) return this.settings.syncImages;
-                return false;
-            });
+            const filesToSync = localFiles.filter(file => this.shouldSyncPath(file.path, file.extension));
 
             const totalFiles = filesToSync.length;
             let processedCount = 0;
-
-            // Set pour suivre quels fichiers distants sont toujours valides
             const keptRemotePaths = new Set<string>();
-
-            // Concurrency Limit
-            const limit = pLimit(2); // 2 concurrent uploads
+            const limit = pLimit(2);
             const promises: Promise<void>[] = [];
-
-            // 3. Phase de Propagation (Local -> Drive) - Optimized Diff
             const filesToUpload: TFile[] = [];
 
-            // Pre-calculation pass: Filter out files that don't need syncing locally
+            // 3. Fast RAM-first diff pass (O(1) mtime lookup against external cache)
             this.updateStatus('Gemini Sync: Checking local changes...', undefined, true);
 
             let checkCount = 0;
             for (const file of filesToSync) {
                 if (this.cancelRequested) break;
-
-                // Yield to event loop to prevent Obsidian UI freeze during heavy hashing
-                if (++checkCount % 20 === 0) {
+                if (++checkCount % 40 === 0) {
                     await yieldToEventLoop();
                 }
 
-                const remoteEntry = remoteManifest!.files[file.path];
-
-                // If it doesn't exist on remote, it definitely needs upload.
-                // We don't need to compute its hash now; uploadFile will compute it.
+                const remoteEntry = remoteManifest.files[file.path];
                 if (!remoteEntry) {
                     filesToUpload.push(file);
                     continue;
                 }
 
-                // If it exists on remote, check if we can use cached hash
                 let localHash: string;
-                const cachedEntry = this.settings.syncIndex[file.path];
-
+                const cachedEntry = this.localCache.get(file.path);
                 if (cachedEntry && cachedEntry.lastModified === file.stat.mtime && cachedEntry.hash) {
-                    // Trust the cache if mtime hasn't changed
                     localHash = cachedEntry.hash;
                 } else {
-                    // Calculate fresh hash
                     localHash = await this.calculateFileHash(file);
                 }
 
-                // If remote exists and hash matches, SKIP upload & API calls
                 if (remoteEntry.hash === localHash) {
-                    // Update usage index (cache) if needed
-                    if (!this.settings.syncIndex[file.path] || this.settings.syncIndex[file.path].lastModified !== file.stat.mtime) {
-                        this.settings.syncIndex[file.path] = {
-                            path: file.path,
-                            driveId: remoteEntry.driveId,
-                            hash: localHash,
-                            lastModified: file.stat.mtime
-                        };
-                    }
+                    this.localCache.set({
+                        path: file.path,
+                        driveId: remoteEntry.driveId,
+                        hash: localHash,
+                        lastModified: file.stat.mtime
+                    });
                     keptRemotePaths.add(file.path);
-                    processedCount++; // Validated as "synced" (no-op)
+                    processedCount++;
                 } else {
                     filesToUpload.push(file);
                 }
             }
 
-            // Sync only what's needed
+            // Group dirty files by folder
             const filesByFolder = new Map<string, TFile[]>();
             for (const file of filesToUpload) {
                 const parentPath = file.parent?.path || '';
@@ -245,50 +563,41 @@ export class SyncManager {
                 filesByFolder.get(parentPath)!.push(file);
             }
 
-            // Incremental Save State
             let lastSaveTime = Date.now();
             let filesSinceLastSave = 0;
-
-            if (filesToUpload.length === 0) {
-                this.notifier.notify('Gemini Sync: No changes so far.');
-            }
 
             for (const [folderPath, folderFiles] of filesByFolder) {
                 if (this.cancelRequested) break;
 
-                // Ensure folder exists and cache its ID (Only for dirty folders)
                 const parentId = await this.ensureFolderStructure(folderPath);
-
-                // Pre-fetch all files in this remote folder (Batching)
-                const remoteFolderCache = await this.driveClient.listFilesInFolder(parentId);
+                const needsSmartRecovery = folderFiles.some(f => !remoteManifest.files[f.path]);
+                const remoteFolderCache = needsSmartRecovery
+                    ? await this.driveClient.listFilesInFolder(parentId)
+                    : new Map();
 
                 for (const file of folderFiles) {
                     if (this.cancelRequested) break;
 
                     promises.push(limit(async () => {
                         if (this.cancelRequested) return;
-
                         await yieldToEventLoop();
 
                         try {
                             processedCount++;
-                            const percentage = Math.round((processedCount / totalFiles) * 100);
+                            const percentage = Math.round((processedCount / Math.max(1, totalFiles)) * 100);
                             this.updateStatus(`Gemini Sync: Syncing ${processedCount}/${totalFiles} (${percentage}%)`, undefined, true);
 
-                            // Re-calculate hash (fast, maybe cached in memory if we optimized further, but safe here)
-                            // Actually we calculated it above but didn't store it for the loop. 
-                            // Let's re-use cache or calc again.
                             let localHash: string;
-                            const cachedEntry = this.settings.syncIndex[file.path];
+                            const cachedEntry = this.localCache.get(file.path);
                             if (cachedEntry && cachedEntry.lastModified === file.stat.mtime && cachedEntry.hash) {
                                 localHash = cachedEntry.hash;
                             } else {
                                 localHash = await this.calculateFileHash(file);
                             }
 
-                            let remoteEntry = remoteManifest!.files[file.path];
+                            let remoteEntry = remoteManifest.files[file.path];
 
-                            // SMART RECOVERY (Instant check via cache for what we thought was missing)
+                            // Smart recovery when file already exists on Drive but wasn't in manifest
                             if (!remoteEntry) {
                                 const isDocType = file.extension === 'md' || file.extension === 'canvas';
                                 const searchName = isDocType ? file.basename : file.name;
@@ -304,216 +613,280 @@ export class SyncManager {
                                     }
 
                                     if (isUpToDate) {
-                                        remoteManifest!.files[file.path] = {
+                                        remoteManifest.files[file.path] = {
                                             path: file.path,
                                             driveId: existingFile.id,
                                             hash: localHash,
                                             modifiedTime: Date.now()
                                         };
-                                        this.settings.syncIndex[file.path] = {
+                                        this.localCache.set({
                                             path: file.path,
                                             driveId: existingFile.id,
                                             hash: localHash,
                                             lastModified: file.stat.mtime
-                                        };
-                                        remoteEntry = remoteManifest!.files[file.path];
+                                        });
+                                        remoteEntry = remoteManifest.files[file.path];
+                                        recoveredCount++;
+                                        isManifestDirty = true;
                                     } else {
-                                        // Force update logic
-                                        remoteManifest!.files[file.path] = {
+                                        remoteManifest.files[file.path] = {
                                             path: file.path,
                                             driveId: existingFile.id,
                                             hash: 'mismatch',
                                             modifiedTime: 0
                                         };
-                                        remoteEntry = remoteManifest!.files[file.path];
+                                        remoteEntry = remoteManifest.files[file.path];
                                     }
                                 }
                             }
 
-                            // Décision : Upload si inexistant ou modifié
                             if (!remoteEntry || remoteEntry.hash !== localHash) {
-                                await this.uploadFile(file, rootId, remoteManifest!);
+                                await this.uploadFile(file, rootId, remoteManifest);
+                                uploadedCount++;
+                                isManifestDirty = true;
                             } else {
-                                // Should be caught by pre-filter, but if Smart Recovery found it just now:
-                                if (!this.settings.syncIndex[file.path] || this.settings.syncIndex[file.path].lastModified !== file.stat.mtime) {
-                                    this.settings.syncIndex[file.path] = {
-                                        path: file.path,
-                                        driveId: remoteEntry.driveId,
-                                        hash: localHash,
-                                        lastModified: file.stat.mtime
-                                    };
-                                }
+                                this.localCache.set({
+                                    path: file.path,
+                                    driveId: remoteEntry.driveId,
+                                    hash: localHash,
+                                    lastModified: file.stat.mtime
+                                });
                             }
 
                             keptRemotePaths.add(file.path);
 
-                            // Incremental Save Check
+                            // Incremental checkpoint save every 50 uploads or 30s
                             filesSinceLastSave++;
                             const now = Date.now();
-                            if (filesSinceLastSave >= 50 || (now - lastSaveTime > 30000)) { // Every 50 files or 30s
+                            if (isManifestDirty && (filesSinceLastSave >= 50 || (now - lastSaveTime > 30000))) {
                                 filesSinceLastSave = 0;
                                 lastSaveTime = now;
-                                await this.manifestManager.saveManifest(rootId, remoteManifest!);
-                                await this.onSaveSettings();
+                                await this.manifestManager.saveManifest(rootId, remoteManifest);
+                                this.localCache.flushSync();
+                                manifestSaved = true;
                             }
-
                         } catch (err) {
                             console.error(`Failed to sync ${file.path}:`, err);
-                            this.notifier.notify(`Failed to sync ${file.path}`);
                         }
                     }));
                 }
             }
 
-            // Wait for all file uploads to finish
             await Promise.all(promises);
 
-            // 4. Phase de Nettoyage (Drive -> Poubelle)
+            // 4. Clean remote deleted files
             if (!this.cancelRequested) {
-                this.updateStatus('Gemini Sync: Cleaning remote...', undefined, true);
-
                 const remotePaths = Object.keys(remoteManifest.files);
-                let cleanCount = 0;
+                const toDelete: string[] = [];
                 for (const remotePath of remotePaths) {
-                    if (++cleanCount % 50 === 0) await yieldToEventLoop();
-
                     if (!keptRemotePaths.has(remotePath)) {
-                        const isExcluded = excludedFolders.some(ex => remotePath === ex || remotePath.startsWith(ex + '/'));
+                        const isExcluded = excludedFolders.some(ex => ex && (remotePath === ex || remotePath.startsWith(ex + '/')));
                         if (!isExcluded) {
-                            try {
-                                const entry = remoteManifest.files[remotePath];
-                                await this.driveClient.deleteFile(entry.driveId, rootId);
-                                delete remoteManifest.files[remotePath];
-                                delete this.settings.syncIndex[remotePath];
-                            } catch (e) {
-                                console.error(`Failed to delete remote file ${remotePath}:`, e);
-                            }
+                            toDelete.push(remotePath);
                         }
                     }
                 }
 
-                // 5. Sauvegarder le nouvel état
-                remoteManifest.lastSync = Date.now();
-                await this.manifestManager.saveManifest(rootId, remoteManifest);
-                await this.onSaveSettings();
+                if (toDelete.length > 0) {
+                    this.updateStatus(`Gemini Sync: Cleaning ${toDelete.length} remote file(s)...`, undefined, true);
+                    let cleanCount = 0;
+                    for (const remotePath of toDelete) {
+                        if (++cleanCount % 50 === 0) await yieldToEventLoop();
+                        try {
+                            const entry = remoteManifest.files[remotePath];
+                            await this.driveClient.deleteFile(entry.driveId, rootId);
+                            delete remoteManifest.files[remotePath];
+                            this.localCache.delete(remotePath);
+                            deletedCount++;
+                            isManifestDirty = true;
+                        } catch (e) {
+                            console.error(`Failed to delete remote file ${remotePath}:`, e);
+                        }
+                    }
+                }
 
-                this.notifier.notify('Gemini Sync: Mirroring complete!');
-                this.updateStatus('Gemini Sync: Ready', 5000);
+                // 5. Only upload manifest if something ACTUALLY changed!
+                if (isManifestDirty) {
+                    remoteManifest.lastSync = Date.now();
+                    await this.manifestManager.saveManifest(rootId, remoteManifest);
+                    manifestSaved = true;
+                    this.manifestDirty = false;
+                }
+                this.localCache.flushSync();
+
+                const durMs = Date.now() - startedAt;
+                appendSyncAuditEvent({
+                    event: 'syncVault',
+                    silent,
+                    durationMs: durMs,
+                    totalFiles,
+                    uploadedCount,
+                    recoveredCount,
+                    deletedCount,
+                    deduplicatedManifests,
+                    manifestSaved
+                });
+
+                if (!silent) {
+                    const summary = uploadedCount === 0 && deletedCount === 0
+                        ? 'Gemini Sync: Already up to date.'
+                        : `Gemini Sync: ${uploadedCount} uploaded, ${deletedCount} cleaned.`;
+                    this.notifier.notify(summary);
+                }
+                this.updateStatus(
+                    uploadedCount > 0 || deletedCount > 0
+                        ? `Gemini Sync: ✓ ${uploadedCount}↑ ${deletedCount}×`
+                        : 'Gemini Sync: ✓',
+                    5000
+                );
             } else {
                 this.notifier.notify('Gemini Sync: Cancelled.');
                 this.updateStatus('Gemini Sync: Cancelled', 5000);
-                // Save progress even on cancel
-                await this.manifestManager.saveManifest(rootId, remoteManifest);
-                await this.onSaveSettings();
+                if (isManifestDirty) {
+                    await this.manifestManager.saveManifest(rootId, remoteManifest);
+                }
+                this.localCache.flushSync();
             }
-
-        } catch (globalError) {
+        } catch (globalError: any) {
             console.error('Gemini Sync Fatal Error:', globalError);
+            appendSyncAuditEvent({
+                event: 'syncVaultError',
+                silent,
+                durationMs: Date.now() - startedAt,
+                error: String(globalError?.message || globalError).slice(0, 200)
+            });
             this.notifier.notify('Gemini Sync Failed. See console.');
             this.updateStatus('Gemini Sync: Failed', undefined);
         } finally {
             this.isSyncing = false;
+            // Drain any watchdog events that fired while full sync was running
+            if (this.pendingWatchPaths.size > 0) {
+                const queued = Array.from(this.pendingWatchPaths);
+                this.pendingWatchPaths.clear();
+                for (const p of queued) {
+                    void this.singleFileLimit(() => this.pushSingleFileByPath(p));
+                }
+            }
+            if (this.pendingDeletePaths.size > 0) {
+                void this.flushPendingDeletes();
+            }
         }
+    }
+
+    private getMimeTypeForFile(file: TFile): string {
+        if (file.extension === 'md' || file.extension === 'canvas') return 'application/vnd.google-apps.document';
+        if (file.extension === 'pdf') return 'application/pdf';
+        if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) {
+            return `image/${file.extension === 'jpg' ? 'jpeg' : file.extension}`;
+        }
+        return 'application/octet-stream';
     }
 
     private calculateHashFromContent(content: string | ArrayBuffer | Buffer): string {
+        const hash = crypto.createHash('md5');
         if (typeof content === 'string') {
-            return CryptoJS.MD5(content).toString();
+            hash.update(content, 'utf8');
+        } else if (Buffer.isBuffer(content)) {
+            hash.update(content);
         } else {
-            const word = CryptoJS.lib.WordArray.create(content as any);
-            return CryptoJS.MD5(word).toString();
+            hash.update(new Uint8Array(content));
         }
+        return hash.digest('hex');
     }
 
     private async uploadFile(file: TFile, rootId: string, manifest: RemoteManifest) {
-        const content = await this.getFileContent(file);
-        const hash = this.calculateHashFromContent(content);
+        const maxRetries = 3;
+        let delay = 1000;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                const content = await this.getFileContent(file);
+                const hash = this.calculateHashFromContent(content);
+                const mimeType = this.getMimeTypeForFile(file);
+                const parentId = await this.ensureFolderStructure(file.parent?.path || '');
 
-        let mimeType = 'application/octet-stream';
-        if (file.extension === 'md' || file.extension === 'canvas') mimeType = 'application/vnd.google-apps.document';
-        else if (file.extension === 'pdf') mimeType = 'application/pdf';
-        else if (['png', 'jpg', 'jpeg', 'gif'].includes(file.extension)) mimeType = `image/${file.extension === 'jpg' ? 'jpeg' : file.extension}`;
+                const existingEntry = manifest.files[file.path];
+                let driveId: string;
 
-        const parentId = await this.ensureFolderStructure(file.parent?.path || '');
+                if (existingEntry) {
+                    try {
+                        await this.driveClient.updateFile(existingEntry.driveId, content, mimeType);
+                        driveId = existingEntry.driveId;
+                    } catch (err: any) {
+                        if (err instanceof DriveHttpError && err.status === 404) {
+                            driveId = await this.driveClient.uploadFile(
+                                (file.extension === 'md' || file.extension === 'canvas') ? file.basename : file.name,
+                                content,
+                                mimeType,
+                                parentId
+                            );
+                        } else {
+                            throw err;
+                        }
+                    }
+                } else {
+                    driveId = await this.driveClient.uploadFile(
+                        (file.extension === 'md' || file.extension === 'canvas') ? file.basename : file.name,
+                        content,
+                        mimeType,
+                        parentId
+                    );
+                }
 
-        const existingEntry = manifest.files[file.path];
-        let driveId: string;
+                manifest.files[file.path] = {
+                    path: file.path,
+                    driveId,
+                    hash,
+                    modifiedTime: Date.now()
+                };
 
-        if (existingEntry) {
-            await this.driveClient.updateFile(existingEntry.driveId, content, mimeType);
-            driveId = existingEntry.driveId;
-        } else {
-            // Check if file exists on drive to avoid dups (stale manifest case)
-            // Or just upload new. Trust manifest? 
-            // Let's trust manifest for speed, but maybe check if ID is null
-            driveId = await this.driveClient.uploadFile(
-                (file.extension === 'md' || file.extension === 'canvas') ? file.basename : file.name,
-                content,
-                mimeType,
-                parentId
-            );
+                this.localCache.set({
+                    path: file.path,
+                    driveId,
+                    hash,
+                    lastModified: file.stat.mtime
+                });
+                return;
+            } catch (err: any) {
+                const status = err?.status || 0;
+                const isTransient = status === 403 || status === 429 || status >= 500 || (err?.message && /rate|quota|timeout|econnreset/i.test(err.message));
+                if (isTransient && attempt < maxRetries) {
+                    console.warn(`Gemini Sync: Transient error uploading ${file.path} (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`, err);
+                    await new Promise((r) => setTimeout(r, delay));
+                    delay *= 2;
+                } else {
+                    throw err;
+                }
+            }
         }
-
-        // Update Manifest
-        manifest.files[file.path] = {
-            path: file.path,
-            driveId: driveId,
-            hash: hash,
-            modifiedTime: Date.now()
-        };
-
-        // Update Local Index
-        this.settings.syncIndex[file.path] = {
-            path: file.path,
-            driveId: driveId,
-            hash: hash,
-            lastModified: file.stat.mtime
-        };
     }
 
-    private async getFileContent(file: TFile): Promise<any> {
+    private async getFileContent(file: TFile): Promise<string | Buffer> {
         if (file.extension === 'md') {
             return await this.app.vault.read(file);
-        } else if (file.extension === 'canvas') {
-            return await this.canvasConverter.generateCanvasMarkdown(file);
-        } else {
-            const buffer = await this.app.vault.readBinary(file);
-            return Buffer.from(buffer);
         }
+        if (file.extension === 'canvas') {
+            return await this.canvasConverter.generateCanvasMarkdown(file);
+        }
+        const buffer = await this.app.vault.readBinary(file);
+        return Buffer.from(buffer);
     }
 
     private async calculateFileHash(file: TFile): Promise<string> {
-        if (file.extension === 'md') {
-            const content = await this.app.vault.read(file);
-            return CryptoJS.MD5(content).toString();
-        } else if (file.extension === 'canvas') {
-            // Hash the generated content so we detect changes in structure or embedded notes
-            const content = await this.canvasConverter.generateCanvasMarkdown(file);
-            return CryptoJS.MD5(content).toString();
-        } else {
-            const buffer = await this.app.vault.readBinary(file);
-            const word = CryptoJS.lib.WordArray.create(buffer as any);
-            return CryptoJS.MD5(word).toString();
-        }
+        const content = await this.getFileContent(file);
+        return this.calculateHashFromContent(content);
     }
 
     private async getVaultRoot(): Promise<string> {
         if (this.rootFolderId) return this.rootFolderId;
-
         const rootPath = this.settings.remoteFolderPath || this.app.vault.getName();
-
-        // Use ensureFolderStructure logic to resolve the full path
-        // We treat the rootPath as a folder structure we need to find/create starting from Drive root
         const rootId = await this.resolveRemoteRoot(rootPath);
-
         this.rootFolderId = rootId;
         return rootId;
     }
 
-    private async resolveRemoteRoot(path: string): Promise<string> {
-        if (!path || path === '/') return 'root';
-
-        const parts = path.split('/').filter(p => p.length > 0);
+    private async resolveRemoteRoot(remotePath: string): Promise<string> {
+        if (!remotePath || remotePath === '/') return 'root';
+        const parts = remotePath.split('/').filter(p => p.length > 0);
         let parentId = 'root';
 
         for (const part of parts) {
@@ -526,13 +899,13 @@ export class SyncManager {
         return parentId;
     }
 
-    private async ensureFolderStructure(path: string): Promise<string> {
+    private async ensureFolderStructure(folderPath: string): Promise<string> {
         let parentId = await this.getVaultRoot();
-        if (!path || path === '/') return parentId;
+        if (!folderPath || folderPath === '/') return parentId;
 
-        if (this.folderIdCache.has(path)) return this.folderIdCache.get(path)!;
+        if (this.folderIdCache.has(folderPath)) return this.folderIdCache.get(folderPath)!;
 
-        const parts = path.split('/');
+        const parts = folderPath.split('/');
         let currentPath = '';
 
         for (const part of parts) {
@@ -552,57 +925,33 @@ export class SyncManager {
     }
 
     private async waitForObsidianSync(): Promise<void> {
-        // Access internal API safely
         const internalPlugins = (this.app as any).internalPlugins;
         if (!internalPlugins) return;
 
         const syncPlugin = internalPlugins.plugins['sync'];
         if (!syncPlugin || !syncPlugin.enabled) return;
 
-        // Check if sync instance exists and has status
         const syncInstance = syncPlugin.instance;
         if (!syncInstance) return;
 
-        // Helper to get status
-        const getStatus = () => {
-            // status can be 'fully_synced', 'syncing', 'error', 'paused'
-            // We might need to inspect the DOM or internal state if 'status' property isn't directly exposed
-            // But usually syncInstance.status is the way.
-            return syncInstance.status;
-        };
-
-        // États considérés comme "finis" ou ne nécessitant pas d'attente
+        const getStatus = () => syncInstance.status;
         const isInactive = (s: string) => ['fully_synced', 'paused', 'error'].includes(s);
 
         const currentStatus = getStatus();
-        // Si le statut est indéfini (non chargé) ou inactif, on n'attend pas
         if (!currentStatus || isInactive(currentStatus)) return;
 
         this.updateStatus('Waiting for Obsidian Sync...', undefined, true);
-        // console.log('Gemini Sync: Waiting for Obsidian Sync to finish...');
 
         return new Promise<void>((resolve) => {
             let checks = 0;
-            const maxChecks = 30; // 30 seconds timeout
+            const maxChecks = 30;
 
             const interval = window.setInterval(() => {
                 checks++;
                 const status = getStatus();
 
-                if (this.cancelRequested) {
+                if (this.cancelRequested || isInactive(status) || checks >= maxChecks) {
                     clearInterval(interval);
-                    resolve();
-                    return;
-                }
-
-                if (isInactive(status) || checks >= maxChecks) {
-                    clearInterval(interval);
-                    if (checks >= maxChecks) {
-                        this.notifier.notify('Gemini Sync: Timed out waiting for Obsidian Sync. Proceeding...');
-                        // console.log('Gemini Sync: Timed out waiting for Obsidian Sync.');
-                    } else {
-                        // console.log('Gemini Sync: Obsidian Sync finished.');
-                    }
                     resolve();
                 }
             }, 1000);

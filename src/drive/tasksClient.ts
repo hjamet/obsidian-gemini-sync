@@ -1,4 +1,3 @@
-import { google, tasks_v1 } from 'googleapis';
 import { DriveClient } from './driveClient';
 
 export interface TaskItem {
@@ -9,6 +8,8 @@ export interface TaskItem {
     status: string;
 }
 
+const TASKS_API_BASE = 'https://tasks.googleapis.com/tasks/v1';
+
 export class TasksClient {
     private driveClient: DriveClient;
 
@@ -16,88 +17,71 @@ export class TasksClient {
         this.driveClient = driveClient;
     }
 
-    private getService(): tasks_v1.Tasks {
-        return this.driveClient.getTasks();
-    }
-
     /**
      * Lists all active tasks from the default list.
-     * Only returns tasks that are not 'completed' (hidden).
      */
     async listActiveTasks(): Promise<TaskItem[]> {
-        const service = this.getService();
-        try {
-            const res = await service.tasks.list({
-                tasklist: '@default',
-                showCompleted: false,
-                maxResults: 100
-            });
-
-            if (!res.data.items) {
-                return [];
-            }
-
-            console.log('Gemini Sync: All tasks fetched:', res.data.items?.map(t => t.title));
-
-            return res.data.items.map(t => ({
-                id: t.id!,
-                title: t.title!,
-                notes: t.notes || '',
-                due: t.due || undefined,
-                status: t.status!
-            }));
-
-        } catch (error) {
-            console.error('Gemini Sync: Failed to list tasks', error);
-            // Fail-fast principle: propagate error if it's critical, or return empty if it's just network?
-            // "Fail-Fast: Si une condition attendue n'est pas remplie, le script DOIT échouer de manière explicite"
-            throw new Error(`Failed to list tasks from Google: ${error.message}`);
+        const params = new URLSearchParams({
+            showCompleted: 'false',
+            maxResults: '100'
+        });
+        const res = await this.driveClient.authorizedFetch(`${TASKS_API_BASE}/lists/@default/tasks?${params.toString()}`);
+        if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(`Failed to list tasks from Google: ${res.status} ${txt}`);
         }
+        const data = await res.json();
+        if (!Array.isArray(data.items)) {
+            return [];
+        }
+        return data.items.map((t: any) => ({
+            id: t.id,
+            title: t.title || 'Untitled Task',
+            notes: t.notes || '',
+            due: t.due || undefined,
+            status: t.status || 'needsAction'
+        }));
     }
 
     /**
      * Fetches a specific task by ID.
      */
     async getTask(taskId: string): Promise<TaskItem | null> {
-        const service = this.getService();
-        try {
-            const res = await service.tasks.get({
-                tasklist: '@default',
-                task: taskId
-            });
-            const t = res.data;
-            if (!t) return null;
-            return {
-                id: t.id!,
-                title: t.title!,
-                notes: t.notes || '',
-                due: t.due || undefined,
-                status: t.status!
-            };
-        } catch (error) {
-            console.error(`Gemini Sync: Failed to get task ${taskId}`, error);
-            return null; // If task is deleted or inaccessible, return null
+        const res = await this.driveClient.authorizedFetch(
+            `${TASKS_API_BASE}/lists/@default/tasks/${encodeURIComponent(taskId)}`
+        );
+        if (res.status === 404) return null;
+        if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(`Failed to get task ${taskId}: ${res.status} ${txt}`);
         }
+        const t = await res.json();
+        if (!t || !t.id) return null;
+        return {
+            id: t.id,
+            title: t.title || '',
+            notes: t.notes || '',
+            due: t.due || undefined,
+            status: t.status || 'needsAction'
+        };
     }
 
     /**
      * Marks a task as completed.
      */
     async completeTask(taskId: string): Promise<void> {
-        const service = this.getService();
-        try {
-            await service.tasks.update({
-                tasklist: '@default',
-                task: taskId,
-                requestBody: {
-                    id: taskId,
-                    status: 'completed'
-                }
-            });
-            console.log(`Gemini Sync: Task ${taskId} marked as completed.`);
-        } catch (error) {
-            console.error(`Gemini Sync: Failed to complete task ${taskId}`, error);
-            throw new Error(`Failed to complete task ${taskId}: ${error.message}`);
+        const res = await this.driveClient.authorizedFetch(
+            `${TASKS_API_BASE}/lists/@default/tasks/${encodeURIComponent(taskId)}`,
+            {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+                body: JSON.stringify({ id: taskId, status: 'completed' })
+            }
+        );
+        if (!res.ok) {
+            const txt = await res.text();
+            throw new Error(`Failed to complete task ${taskId}: ${res.status} ${txt}`);
         }
+        console.log(`Gemini Sync: Task ${taskId} marked as completed.`);
     }
 }

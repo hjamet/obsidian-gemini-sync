@@ -1,9 +1,10 @@
-import { App, Plugin, PluginSettingTab, Setting, Notice, setIcon } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, setIcon } from 'obsidian';
 import { DriveClient } from './drive/driveClient';
 import { SyncManager } from './sync/syncManager';
 import { ObsidianNotifier } from './notifications/obsidianNotifier';
 import { SetupWizardModal } from './ui/setupWizard';
 import { FolderSuggestModal } from './ui/folderSuggest';
+import { LocalSyncCache } from './sync/localCache';
 
 export interface SyncIndexEntry {
     path: string;
@@ -22,17 +23,21 @@ export interface GeminiSyncSettings {
     refreshToken: string;
     remoteFolderPath: string;
     syncOnStartup: boolean;
+    startupDelaySeconds: number;
+    enableWatchdog: boolean;
+    watchDebounceSeconds: number;
     syncImages: boolean;
     syncPDFs: boolean;
     syncCanvas: boolean;
     syncInterval: number; // in minutes
     excludedFolders: string[];
-    syncIndex: SyncIndex;
+    syncIndex?: SyncIndex; // Legacy only: migrated automatically out of data.json into ~/.obsidian-gemini-sync/
     // Project Sync Settings
     projectsFolderPath: string;
     enableTaskSync: boolean;
     deleteNoteOnTaskComplete: boolean;
     completionTag: string;
+    taskTag: string;
 }
 
 const DEFAULT_SETTINGS: GeminiSyncSettings = {
@@ -41,78 +46,118 @@ const DEFAULT_SETTINGS: GeminiSyncSettings = {
     refreshToken: '',
     remoteFolderPath: '',
     syncOnStartup: true,
+    startupDelaySeconds: 30,
+    enableWatchdog: true,
+    watchDebounceSeconds: 60,
     syncImages: true,
     syncPDFs: true,
     syncCanvas: true,
     syncInterval: 60,
     excludedFolders: [],
-    syncIndex: {},
-    projectsFolderPath: 'Projects', // Default folder
+    projectsFolderPath: 'Projects',
     enableTaskSync: true,
     deleteNoteOnTaskComplete: true,
-    completionTag: 'projet-fini'
-}
+    completionTag: 'projet-fini',
+    taskTag: 'todo'
+};
 
 export default class GeminiSyncPlugin extends Plugin {
     settings: GeminiSyncSettings;
     driveClient: DriveClient;
     syncManager: SyncManager;
+    localCache: LocalSyncCache;
     syncIntervalId: number | undefined;
+    startupTimeoutId: number | undefined;
     statusBarItem: HTMLElement;
     notifier: ObsidianNotifier;
 
     async onload() {
-        console.log('Gemini Sync: Loading v1.8.1 with Localhost Redirect');
-        new Notice('Gemini Sync v1.8.1 loaded with Localhost Redirect!');
         await this.loadSettings();
 
+        const adapter = this.app.vault.adapter as any;
+        const vaultId = typeof adapter?.getBasePath === 'function'
+            ? adapter.getBasePath()
+            : this.app.vault.getName();
+        this.localCache = new LocalSyncCache(vaultId);
+
+        // One-time migration: move bloated syncIndex (2.6 MB) out of data.json to external local cache
+        if (this.settings.syncIndex && Object.keys(this.settings.syncIndex).length > 0) {
+            const migrated = this.localCache.migrateFromLegacySyncIndex(this.settings.syncIndex);
+            if (migrated) {
+                delete this.settings.syncIndex;
+                await this.saveData(this.settings);
+                console.log(`Gemini Sync: Migrated ${this.localCache.size()} cache entries out of data.json to ${this.localCache.getCacheFilePath()}`);
+            }
+        }
+
+        this.notifier = new ObsidianNotifier();
         this.initializeDriveClient();
 
         this.statusBarItem = this.addStatusBarItem();
         this.statusBarItem.setText('');
 
-        this.notifier = new ObsidianNotifier();
-        this.syncManager = new SyncManager(this.app, this.driveClient, this.settings, this.statusBarItem, () => this.saveSettings(), this.notifier);
+        this.syncManager = new SyncManager(
+            this.app,
+            this.driveClient,
+            this.settings,
+            this.statusBarItem,
+            () => this.saveSettings(),
+            this.notifier,
+            this.localCache
+        );
 
         this.addSettingTab(new GeminiSyncSettingTab(this.app, this));
 
-        // Command to test auth
         this.addCommand({
             id: 'test-auth',
             name: 'Test Authentication',
             callback: async () => {
                 if (this.driveClient.isReady()) {
-                    new Notice('Authenticated!');
+                    new Notice('Gemini Sync: Authenticated!');
                 } else {
-                    new Notice('Not authenticated. Please check settings.');
+                    new Notice('Gemini Sync: Not authenticated. Please check settings.');
                 }
             }
         });
 
-        // Command to Sync
         this.addCommand({
             id: 'sync-now',
             name: 'Sync Now',
             callback: async () => {
-                await this.syncManager.syncVault();
+                await this.syncManager.syncVault({ silent: false });
             }
         });
 
-        // Ribbon Icon
         this.addRibbonIcon('refresh-cw', 'Gemini Sync', async () => {
-            await this.syncManager.syncVault();
+            await this.syncManager.syncVault({ silent: false });
         });
 
         this.configurePeriodicSync();
 
-        // Trigger sync on startup if enabled
-        if (this.settings.syncOnStartup) {
-            this.app.workspace.onLayoutReady(() => {
+        // Register watchdog listeners & deprioritized startup reconciliation ONLY after layout is ready
+        this.app.workspace.onLayoutReady(() => {
+            // Incremental per-file watchdog (60s debounce -> single PATCH for instant Mobile Gemini continuity)
+            this.registerEvent(this.app.vault.on('modify', (file) => {
+                if (file instanceof TFile) this.syncManager.scheduleFileSync(file);
+            }));
+            this.registerEvent(this.app.vault.on('create', (file) => {
+                if (file instanceof TFile) this.syncManager.scheduleFileSync(file);
+            }));
+            this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+                if (file instanceof TFile) void this.syncManager.handleFileRename(file, oldPath);
+            }));
+            this.registerEvent(this.app.vault.on('delete', (file) => {
+                if (file instanceof TFile) this.syncManager.scheduleFileDelete(file.path);
+            }));
+
+            // Deprioritized startup reconciliation (keeps syncOnStartup=true, runs after T+30s when Obsidian has settled)
+            if (this.settings.syncOnStartup) {
                 const triggerSync = () => {
-                    // console.log('Gemini Sync: Triggering startup sync with delay...');
-                    setTimeout(async () => {
-                        await this.syncManager.syncVault();
-                    }, 5000);
+                    const delayMs = Math.max(5, this.settings.startupDelaySeconds || 30) * 1000;
+                    this.startupTimeoutId = window.setTimeout(async () => {
+                        this.startupTimeoutId = undefined;
+                        await this.syncManager.syncVault({ silent: true });
+                    }, delayMs);
                 };
 
                 if ((this.app.metadataCache as any).initialized) {
@@ -124,15 +169,15 @@ export default class GeminiSyncPlugin extends Plugin {
                         })
                     );
                 }
-            });
-        }
+            }
+        });
     }
 
     initializeDriveClient() {
         this.driveClient = new DriveClient({
             clientId: this.settings.clientId,
             clientSecret: this.settings.clientSecret,
-            redirectUri: 'http://127.0.0.1', // Localhost manual copy-paste flow
+            redirectUri: 'http://127.0.0.1',
             refreshToken: this.settings.refreshToken,
             onTokenUpdate: async (token) => {
                 this.settings.refreshToken = token;
@@ -153,10 +198,8 @@ export default class GeminiSyncPlugin extends Plugin {
         }
 
         if (this.settings.syncInterval > 0) {
-            // console.log(`Gemini Sync: Enabling periodic sync every ${this.settings.syncInterval} minutes.`);
             this.syncIntervalId = window.setInterval(async () => {
-                // console.log('Gemini Sync: Triggering periodic sync...');
-                await this.syncManager.syncVault();
+                await this.syncManager.syncVault({ silent: true });
             }, this.settings.syncInterval * 60 * 1000);
         }
     }
@@ -164,6 +207,14 @@ export default class GeminiSyncPlugin extends Plugin {
     async onunload() {
         if (this.syncIntervalId) {
             window.clearInterval(this.syncIntervalId);
+            this.syncIntervalId = undefined;
+        }
+        if (this.startupTimeoutId) {
+            window.clearTimeout(this.startupTimeoutId);
+            this.startupTimeoutId = undefined;
+        }
+        if (this.syncManager) {
+            this.syncManager.dispose();
         }
     }
 
@@ -171,9 +222,8 @@ export default class GeminiSyncPlugin extends Plugin {
         const loadedData = await this.loadData();
         this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
 
-        // Migration: Convert string excludedFolders to array if needed
         if (typeof this.settings.excludedFolders === 'string') {
-            const oldString = this.settings.excludedFolders as string;
+            const oldString = this.settings.excludedFolders as unknown as string;
             if (oldString.trim() === '') {
                 this.settings.excludedFolders = [];
             } else {
@@ -182,14 +232,14 @@ export default class GeminiSyncPlugin extends Plugin {
                     .map(s => s.trim())
                     .filter(s => s.length > 0);
             }
-            await this.saveSettings();
+            await this.saveData(this.settings);
         }
     }
 
     async saveSettings() {
-        await this.saveData(this.settings);
-        // Re-configure sync manager with new settings if needed (or just pass settings ref)
-        // And update periodic sync
+        // Never persist legacy syncIndex back into data.json
+        const { syncIndex: _ignored, ...cleanSettings } = this.settings;
+        await this.saveData(cleanSettings);
         this.configurePeriodicSync();
         if (this.syncManager) {
             this.syncManager.updateSettings(this.settings);
@@ -207,12 +257,10 @@ class GeminiSyncSettingTab extends PluginSettingTab {
 
     display(): void {
         const { containerEl } = this;
-
         containerEl.empty();
 
         containerEl.createEl('h2', { text: 'Gemini Sync Settings' });
 
-        // Wizard Button
         new Setting(containerEl)
             .setName('Setup Wizard')
             .setDesc('Launch the step-by-step guide to configure the plugin.')
@@ -222,7 +270,6 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                 .onClick(() => {
                     new SetupWizardModal(this.app, this.plugin).open();
                 }));
-
 
         new Setting(containerEl)
             .setName('Remote Folder')
@@ -238,13 +285,51 @@ class GeminiSyncSettingTab extends PluginSettingTab {
         containerEl.createEl('h3', { text: 'Synchronization Options' });
 
         new Setting(containerEl)
-            .setName('Sync on Startup')
-            .setDesc('Automatically sync when Obsidian starts.')
+            .setName('Enable Incremental Watchdog (Real-time Mobile Sync)')
+            .setDesc('Automatically push only the modified note after a short debounce so Gemini Mobile stays up to date with near-zero CPU usage.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableWatchdog)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableWatchdog = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Watchdog Debounce (seconds)')
+            .setDesc('Wait time after the last edit on a note before sending a single PATCH to Google Drive (default: 60s).')
+            .addText(text => text
+                .setPlaceholder('60')
+                .setValue(String(this.plugin.settings.watchDebounceSeconds || 60))
+                .onChange(async (value) => {
+                    const num = parseInt(value, 10);
+                    if (!isNaN(num) && num >= 5) {
+                        this.plugin.settings.watchDebounceSeconds = num;
+                        await this.plugin.saveSettings();
+                    }
+                }));
+
+        new Setting(containerEl)
+            .setName('Sync on Startup (Low-Priority Reconciliation)')
+            .setDesc('Run a fast incremental reconciliation after Obsidian starts.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.syncOnStartup)
                 .onChange(async (value) => {
                     this.plugin.settings.syncOnStartup = value;
                     await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Startup Sync Delay (seconds)')
+            .setDesc('Delay before running startup reconciliation so Obsidian loads smoothly first (default: 30s).')
+            .addText(text => text
+                .setPlaceholder('30')
+                .setValue(String(this.plugin.settings.startupDelaySeconds || 30))
+                .onChange(async (value) => {
+                    const num = parseInt(value, 10);
+                    if (!isNaN(num) && num >= 5) {
+                        this.plugin.settings.startupDelaySeconds = num;
+                        await this.plugin.saveSettings();
+                    }
                 }));
 
         new Setting(containerEl)
@@ -287,7 +372,7 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.enableTaskSync = value;
                     await this.plugin.saveSettings();
-                    this.display(); // Refresh to show/hide dependent settings
+                    this.display();
                 }));
 
         if (this.plugin.settings.enableTaskSync) {
@@ -315,6 +400,17 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     }));
 
             new Setting(containerEl)
+                .setName('Task Tag')
+                .setDesc('Tag added to newly created task notes (e.g. todo). Do not include the #.')
+                .addText(text => text
+                    .setPlaceholder('todo')
+                    .setValue(this.plugin.settings.taskTag || 'todo')
+                    .onChange(async (value) => {
+                        this.plugin.settings.taskTag = value.trim().replace(/^#/, '');
+                        await this.plugin.saveSettings();
+                    }));
+
+            new Setting(containerEl)
                 .setName('Completion Tag')
                 .setDesc('Tag that indicates a project is completed locally (e.g. projet-fini). Do not include the #.')
                 .addText(text => text
@@ -328,12 +424,12 @@ class GeminiSyncSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName('Sync Interval')
-            .setDesc('Time in minutes between automatic synchronizations. Set to 0 to disable.')
+            .setDesc('Time in minutes between full reconciliation sweeps. Set to 0 to disable.')
             .addText(text => text
                 .setPlaceholder('60')
                 .setValue(String(this.plugin.settings.syncInterval))
                 .onChange(async (value) => {
-                    const num = parseInt(value);
+                    const num = parseInt(value, 10);
                     if (!isNaN(num) && num >= 0) {
                         this.plugin.settings.syncInterval = num;
                         await this.plugin.saveSettings();
@@ -343,7 +439,7 @@ class GeminiSyncSettingTab extends PluginSettingTab {
         // --- Excluded Folders Section ---
         containerEl.createEl('h3', { text: 'Excluded Folders' });
 
-        const excludedFoldersSetting = new Setting(containerEl)
+        new Setting(containerEl)
             .setName('Manage Excluded Folders')
             .setDesc('Folders added here will be ignored during synchronization.')
             .addButton(button => button
@@ -354,19 +450,18 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                         if (!this.plugin.settings.excludedFolders.includes(folder.path)) {
                             this.plugin.settings.excludedFolders.push(folder.path);
                             await this.plugin.saveSettings();
-                            this.display(); // Refresh settings to show new folder
+                            this.display();
                         } else {
                             new Notice('Folder already excluded');
                         }
                     }).open();
                 }));
 
-        // List of excluded folders
         if (this.plugin.settings.excludedFolders.length > 0) {
             const listContainer = containerEl.createDiv('gemini-sync-excluded-list');
             listContainer.style.marginTop = '10px';
 
-            this.plugin.settings.excludedFolders.forEach((path, index) => {
+            this.plugin.settings.excludedFolders.forEach((folderPath, index) => {
                 const itemContainer = listContainer.createDiv('gemini-sync-excluded-item');
                 itemContainer.style.display = 'flex';
                 itemContainer.style.alignItems = 'center';
@@ -376,7 +471,7 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                 itemContainer.style.backgroundColor = 'var(--background-secondary)';
                 itemContainer.style.borderRadius = '5px';
 
-                itemContainer.createSpan({ text: path });
+                itemContainer.createSpan({ text: folderPath });
 
                 const removeBtn = itemContainer.createEl('button', { cls: 'clickable-icon' });
                 removeBtn.style.background = 'transparent';
@@ -398,7 +493,6 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                 attr: { style: 'margin-bottom: 18px; font-style: italic;' }
             });
         }
-
 
         containerEl.createEl('hr');
         containerEl.createEl('h3', { text: 'Manual Configuration' });
@@ -425,8 +519,6 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-
-
         containerEl.createEl('h3', { text: 'Authentication' });
 
         new Setting(containerEl)
@@ -439,9 +531,7 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                         new Notice('Please enter Client ID and Secret first.');
                         return;
                     }
-                    // Re-initialize client with new settings if needed
                     this.plugin.initializeDriveClient();
-
                     const url = this.plugin.driveClient.generateAuthUrl();
                     window.open(url);
                 }));
@@ -458,10 +548,8 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                         try {
                             const url = new URL(authCode);
                             const extracted = url.searchParams.get('code');
-                            if (extracted) {
-                                authCode = extracted;
-                            }
-                        } catch (e) { }
+                            if (extracted) authCode = extracted;
+                        } catch (e) {}
                     }
                 }))
             .addButton(button => button
@@ -474,7 +562,6 @@ class GeminiSyncSettingTab extends PluginSettingTab {
                     }
                     try {
                         await this.plugin.driveClient.authorize(authCode);
-                        // Refresh settings view to show status (optional, or just show notice)
                         this.display();
                     } catch (e) {
                         new Notice('Authentication failed.');

@@ -13,83 +13,138 @@ export interface RemoteManifest {
     files: { [path: string]: RemoteEntry };
 }
 
+export interface ManifestLoadResult {
+    manifest: RemoteManifest | null;
+    deduplicatedCount: number;
+}
+
 export class ManifestManager {
     private static MANIFEST_FILE_NAME = '.gemini-sync-manifest.json';
     private driveClient: DriveClient;
     private manifestId: string | null = null;
+    private duplicateIdsToTrash: string[] = [];
 
     constructor(driveClient: DriveClient) {
         this.driveClient = driveClient;
     }
 
-    async loadManifest(rootFolderId: string): Promise<RemoteManifest | null> {
-        try {
-            // 1. Find the manifest file in the root folder
-            const manifestId = await this.driveClient.getFileId(
-                ManifestManager.MANIFEST_FILE_NAME, 
-                rootFolderId, 
-                'application/json'
-            );
+    public reset(): void {
+        this.manifestId = null;
+        this.duplicateIdsToTrash = [];
+    }
 
-            if (!manifestId) {
-                console.log('Remote manifest not found. Assuming first sync or fresh start.');
-                return null;
-            }
+    public getManifestId(): string | null {
+        return this.manifestId;
+    }
 
-            this.manifestId = manifestId;
+    /**
+     * Loads the remote manifest from Google Drive.
+     * If duplicate .gemini-sync-manifest.json files exist, merges them deterministically
+     * and trashes the duplicate files after saving the canonical merged manifest.
+     */
+    async loadManifest(rootFolderId: string): Promise<ManifestLoadResult> {
+        const escapedName = ManifestManager.MANIFEST_FILE_NAME.replace(/'/g, "\\'");
+        const query = `name = '${escapedName}' and trashed = false and '${rootFolderId}' in parents and mimeType = 'application/json'`;
+        const files = await this.driveClient.listFilesByQuery(query, 'files(id, modifiedTime, size)');
 
-            // 2. Download content
-            const content = await this.driveClient.getFileContent(manifestId);
-            if (!content) return null;
-
-            const json = JSON.parse(content);
-            return json as RemoteManifest;
-
-        } catch (error) {
-            console.error('Failed to load remote manifest:', error);
-            return null;
+        if (files.length === 0) {
+            console.log('Gemini Sync: Remote manifest not found. Assuming first sync or fresh start.');
+            return { manifest: null, deduplicatedCount: 0 };
         }
+
+        if (files.length === 1) {
+            this.manifestId = files[0].id;
+            const content = await this.driveClient.getFileContent(files[0].id);
+            if (!content) return { manifest: null, deduplicatedCount: 0 };
+            return { manifest: JSON.parse(content) as RemoteManifest, deduplicatedCount: 0 };
+        }
+
+        console.warn(`Gemini Sync: ${files.length} duplicate manifest files found on Drive. Merging and cleaning duplicates...`);
+        const allLoaded: Array<{ id: string; manifest: RemoteManifest; fileCount: number; modifiedTime: number }> = [];
+        for (const f of files) {
+            try {
+                const c = await this.driveClient.getFileContent(f.id);
+                if (c) {
+                    const parsed = JSON.parse(c) as RemoteManifest;
+                    allLoaded.push({
+                        id: f.id,
+                        manifest: parsed,
+                        fileCount: Object.keys(parsed.files || {}).length,
+                        modifiedTime: new Date(f.modifiedTime || 0).getTime()
+                    });
+                }
+            } catch (e) {
+                console.warn(`Gemini Sync: Failed to parse duplicate manifest candidate ${f.id}:`, e);
+            }
+        }
+
+        if (allLoaded.length === 0) return { manifest: null, deduplicatedCount: 0 };
+
+        allLoaded.sort((a, b) => b.fileCount - a.fileCount || b.modifiedTime - a.modifiedTime);
+        const primary = allLoaded[0];
+        const mergedFiles: { [path: string]: RemoteEntry } = { ...(primary.manifest.files || {}) };
+
+        for (let i = 1; i < allLoaded.length; i++) {
+            const otherFiles = allLoaded[i].manifest.files || {};
+            for (const [filePath, entry] of Object.entries(otherFiles)) {
+                if (!entry || !entry.driveId) continue;
+                const existing = mergedFiles[filePath];
+                if (!existing || (entry.modifiedTime || 0) > (existing.modifiedTime || 0)) {
+                    mergedFiles[filePath] = entry;
+                }
+            }
+        }
+
+        primary.manifest.files = mergedFiles;
+        this.manifestId = primary.id;
+        this.duplicateIdsToTrash = files.map(f => f.id).filter(id => id !== primary.id);
+
+        // Immediately persist merged manifest & trash duplicate manifest files
+        await this.saveManifest(rootFolderId, primary.manifest);
+        let trashed = 0;
+        for (const dupId of this.duplicateIdsToTrash) {
+            try {
+                await this.driveClient.deleteFile(dupId, rootFolderId);
+                trashed++;
+                console.log(`Gemini Sync: Trashed duplicate manifest ${dupId}`);
+            } catch (e) {
+                console.warn(`Gemini Sync: Could not trash duplicate manifest ${dupId}:`, e);
+            }
+        }
+        this.duplicateIdsToTrash = [];
+
+        return { manifest: primary.manifest, deduplicatedCount: trashed };
     }
 
     async saveManifest(rootFolderId: string, manifest: RemoteManifest): Promise<void> {
-        try {
-            // Minified JSON for compression/size optimization
-            const content = JSON.stringify(manifest);
-            
-            // Si manifestId est connu, on tente l'update
-            if (this.manifestId) {
-                try {
-                    await this.driveClient.updateFile(this.manifestId, content, 'application/json');
-                    return;
-                } catch (e) {
-                    console.warn('Failed to update manifest by ID, falling back to search/create', e);
-                    // Si l'update échoue (ex: fichier supprimé entre temps), on reset l'ID et on repart sur la logique de recherche/création
-                    this.manifestId = null;
-                }
-            }
+        const content = JSON.stringify(manifest);
 
-            // Logique de secours : Recherche ou Création
-            const existingId = await this.driveClient.getFileId(
-                ManifestManager.MANIFEST_FILE_NAME, 
-                rootFolderId, 
-                'application/json'
+        if (this.manifestId) {
+            try {
+                await this.driveClient.updateFile(this.manifestId, content, 'application/json');
+                return;
+            } catch (e) {
+                console.warn('Gemini Sync: Failed to update manifest by ID, falling back to search/create', e);
+                this.manifestId = null;
+            }
+        }
+
+        const existingId = await this.driveClient.getFileId(
+            ManifestManager.MANIFEST_FILE_NAME,
+            rootFolderId,
+            'application/json'
+        );
+
+        if (existingId) {
+            this.manifestId = existingId;
+            await this.driveClient.updateFile(existingId, content, 'application/json');
+        } else {
+            this.manifestId = await this.driveClient.uploadFile(
+                ManifestManager.MANIFEST_FILE_NAME,
+                content,
+                'application/json',
+                rootFolderId
             );
-
-            if (existingId) {
-                this.manifestId = existingId;
-                await this.driveClient.updateFile(existingId, content, 'application/json');
-            } else {
-                this.manifestId = await this.driveClient.uploadFile(
-                    ManifestManager.MANIFEST_FILE_NAME,
-                    content,
-                    'application/json',
-                    rootFolderId
-                );
-            }
-            
-        } catch (error) {
-            console.error('Failed to save remote manifest:', error);
-            throw error;
         }
     }
 
